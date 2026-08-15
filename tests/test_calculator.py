@@ -65,10 +65,12 @@ class TestCalculatorTool:
 
     def test_schema_has_required_fields(self, calculator):
         schema = calculator.schema()
-        assert schema["name"] == "calculator"
-        assert "description" in schema
-        assert "input_schema" in schema
-        assert "expression" in schema["input_schema"]["properties"]
+        assert schema["type"] == "function"
+        func = schema["function"]
+        assert func["name"] == "calculator"
+        assert "description" in func
+        assert "parameters" in func
+        assert "expression" in func["parameters"]["properties"]
 
     async def test_execute_integer_result(self, calculator):
         result = await calculator.execute({"expression": "2 + 3"})

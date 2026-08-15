@@ -50,7 +50,7 @@ docs/PHASES/phase-01.md
 ## 3. Architecture
 
 ```
-POST /run → FastAPI → Orchestrator State Machine → Claude (Haiku 4.5) → Calculator Tool
+POST /run → FastAPI → Orchestrator State Machine → GPT-4o-mini → Calculator Tool
                  ↓                                                              ↓
             PostgreSQL (runs table)                                    safe_eval (AST)
 ```
@@ -61,7 +61,7 @@ State machine flow: PLAN → (SELECT_TOOL → CALL_TOOL → OBSERVE)* → FINALI
 
 1. **Explicit state machine** over LangChain — for observability and testability
 2. **AST-based calculator** over eval() — for security
-3. **Anthropic SDK** over OpenAI — existing credits, zero extra cost
+3. **OpenAI SDK** over Anthropic — cheapest API cost (GPT-4o-mini ~5x cheaper per token)
 4. **asyncpg** over SQLAlchemy — minimal abstraction for a small schema
 
 See docs/DECISION_LOG.md for full details.
@@ -90,7 +90,7 @@ See docs/DECISION_LOG.md for full details.
 All tests use mocked LLM (no API calls) and mocked database (no Postgres needed).
 
 **Not verified:**
-- End-to-end with real Claude API (requires ANTHROPIC_API_KEY)
+- End-to-end with real OpenAI API (requires OPENAI_API_KEY)
 - Docker Compose startup (requires Docker Desktop)
 
 ## 7. Limitations
@@ -109,7 +109,7 @@ All tests use mocked LLM (no API calls) and mocked database (no Postgres needed)
 2. "Why an explicit state machine?" — observability, testability, traceability
 3. "Why not LangChain?" — framework hides the loop; I need step-level visibility
 4. "How does the calculator work? Why not eval()?" — AST parsing, security
-5. "Why Anthropic over OpenAI?" — existing credits, clean tool_use API
+5. "Why OpenAI over Anthropic?" — cheapest API cost, mature function-calling
 6. "Why asyncpg over SQLAlchemy?" — small schema, visible queries, fastest driver
 7. "What happens if the LLM returns invalid JSON?" — OrchestratorError (Phase 2 adds retry)
 8. "How do you prevent infinite loops?" — max_steps guard
@@ -133,7 +133,7 @@ All tests use mocked LLM (no API calls) and mocked database (no Postgres needed)
 
 ### Must know
 - The 7 orchestrator states and what each does
-- How Anthropic's tool_use API works: tool schemas → tool_use content blocks → tool_result messages
+- How OpenAI's function-calling API works: tool schemas → tool_calls → tool role messages
 - How Pydantic validates the AgentAnswer schema
 - Why eval() is dangerous and how AST parsing avoids it
 - The request lifecycle from POST /run to response

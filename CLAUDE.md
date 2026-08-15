@@ -27,15 +27,15 @@ If a feature doesn't trace back to one of these sentences, cut it.
 | Database       | PostgreSQL 16                   |
 | Cache          | Redis 7                         |
 | Tracing        | OpenTelemetry SDK               |
-| LLM            | **Anthropic SDK (Claude)**      |
-| Agent model    | Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) |
-| Judge model    | Claude Sonnet (`claude-sonnet-5`) — Phase 5+ |
+| LLM            | **OpenAI SDK**                  |
+| Agent model    | GPT-4o-mini (`gpt-4o-mini`)     |
+| Judge model    | GPT-4o (`gpt-4o`) — Phase 5+    |
 | Containers     | Docker + Compose                |
 | CI             | GitHub Actions                  |
 | Validation     | Pydantic v2                     |
 | DB driver      | asyncpg (raw SQL, no ORM)       |
 
-**LLM provider decision:** Anthropic SDK chosen because Pranav has ~$130/month in Claude credits. OpenAI would cost extra. Tool calling uses Anthropic's `tool_use` content block format.
+**LLM provider decision:** OpenAI SDK chosen for lowest API cost (GPT-4o-mini is ~5x cheaper per token than Claude Haiku). Tool calling uses OpenAI's `tool_calls` / function-calling format.
 
 ## Non-Negotiable Rules
 
@@ -100,7 +100,7 @@ agent-platform/
 
 1. **Explicit state machine** over LangChain — for observability, testability, traceable step transitions
 2. **AST-based calculator** over eval() — LLM controls input, eval() is code injection
-3. **Anthropic SDK** over OpenAI — existing Claude credits
+3. **OpenAI SDK** over Anthropic — cheapest API cost (GPT-4o-mini ~5x cheaper per token)
 4. **asyncpg raw SQL** over SQLAlchemy — small schema (≤6 tables), every query visible
 
 ### Database Schema (Current)
@@ -145,7 +145,7 @@ judge_calibration(id, eval_case_result_id, human_label, judge_label, agree)
 - Versioned dataset: evals/v1/cases.yaml (50–100 cases, created by Pranav)
 - Eval runner: runs agent on each case
 - Deterministic graders: exact match, citation validation, schema check
-- LLM judge: Claude Sonnet scores correctness + groundedness on 1–5 rubric
+- LLM judge: GPT-4o scores correctness + groundedness on 1–5 rubric
 - Results stored in Postgres, aggregate score + cost
 
 ### Phase 6 — Judge Calibration
@@ -210,5 +210,5 @@ python -m pytest tests/ -v
 docker compose up
 # Then: POST http://localhost:8000/run with {"question": "What is 25 * 47?"}
 
-# Requires .env with ANTHROPIC_API_KEY for real LLM calls
+# Requires .env with OPENAI_API_KEY for real LLM calls
 ```

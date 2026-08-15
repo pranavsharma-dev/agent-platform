@@ -16,7 +16,7 @@ graph TD
     I -->|valid| J[Return AgentAnswer]
     I -->|invalid| K[Error]
 
-    C --> L[Calculator Tool]
+    C -.-> L[Calculator Tool]
     B --> M[(PostgreSQL)]
 ```
 
@@ -24,11 +24,11 @@ graph TD
 
 1. Client sends `POST /run` with a question
 2. FastAPI creates a `runs` record in Postgres (status: running)
-3. Orchestrator starts in PLAN state — sends question to Claude with tools
-4. Claude either:
+3. Orchestrator starts in PLAN state — sends question to GPT-4o-mini with tools
+4. The model either:
    - Calls a tool → SELECT_TOOL → CALL_TOOL → OBSERVE → back to LLM
    - Returns text → FINALIZE
-5. FINALIZE parses JSON from Claude's text response, validates with Pydantic
+5. FINALIZE parses JSON from the model's text response, validates with Pydantic
 6. Run record updated to completed (with answer) or failed (with error)
 7. Response returned to client
 

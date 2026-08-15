@@ -76,33 +76,34 @@ AST-based safe evaluator using Python's `ast` module.
 
 ---
 
-## Decision: Anthropic SDK (Claude) as LLM Provider
+## Decision: OpenAI SDK (GPT-4o-mini) as LLM Provider
 
 ### Context
 The project needs an LLM for the orchestrator and later for the evaluation judge. Needed to choose between Anthropic and OpenAI SDKs.
 
 ### Options considered
-1. **OpenAI SDK** — broader documentation, mature function-calling
-2. **Anthropic SDK** — existing credits, good tool_use support
+1. **OpenAI SDK** — cheapest per-token pricing (GPT-4o-mini), mature function-calling, broad documentation
+2. **Anthropic SDK** — strong models, but API credits are separate from chat credits
 
 ### Decision
-Anthropic SDK with Claude models. Haiku 4.5 for agent calls, Sonnet for judge (Phase 5).
+OpenAI SDK. GPT-4o-mini for agent calls, GPT-4o for the judge (Phase 5).
 
 ### Why
-- $130/month in existing Claude credits — zero additional cost
-- Anthropic's tool_use API is well-supported
-- Claude models perform well on tool-calling tasks
+- GPT-4o-mini is ~5x cheaper per token than Claude Haiku (~$0.15/M input vs ~$0.80/M)
+- OpenAI's function-calling API is mature and well-documented
+- Estimated total project cost: $3–6 across all phases
+- The orchestrator logic is provider-agnostic; only the API call layer is OpenAI-specific
 
 ### Tradeoffs
-- Slightly less community documentation for tool-calling patterns than OpenAI
-- Tool calling uses content blocks (tool_use/tool_result) rather than function_call format
-- Switching providers later would require changing the API layer (but not the orchestrator logic)
+- OpenAI models may behave slightly differently on tool-calling edge cases compared to Claude
+- Locked into OpenAI's pricing and availability
+- Switching providers later requires changing the API layer (but not orchestrator state machine or tool logic)
 
 ### Interview question
-"Why did you choose Anthropic over OpenAI?"
+"Why did you choose OpenAI over Anthropic?"
 
 ### Interview answer
-"Practical reason: I had existing Claude credits, so the entire development and evaluation cost was zero. Technical reason: the Anthropic SDK's tool_use API is clean — tools are defined as JSON schemas, and the model returns tool_use content blocks with structured input. The orchestrator logic is provider-agnostic; only the _call_llm method and response parsing are Anthropic-specific."
+"Cost was the deciding factor. GPT-4o-mini is roughly five times cheaper per token than Claude Haiku, and for a project that runs hundreds of evaluation cases, that adds up. The orchestrator logic is provider-agnostic — the state machine, tool registry, and retry policy don't know which LLM is behind the API call. Only the _call_llm method and response parsing are OpenAI-specific, so switching providers would be a contained change."
 
 ---
 

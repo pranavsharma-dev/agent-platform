@@ -3,7 +3,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-import anthropic
+from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from src.config import settings
@@ -74,7 +74,7 @@ Rules:
 
 class Orchestrator:
     def __init__(self, tools: dict | None = None):
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.tools = tools or {}
         self.tool_schemas = [tool.schema() for tool in self.tools.values()]
 
@@ -118,24 +118,31 @@ class Orchestrator:
     # -- State handlers --
 
     async def _plan(self, ctx: RunContext) -> RunContext:
-        ctx.messages = [{"role": "user", "content": ctx.question}]
+        ctx.messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": ctx.question},
+        ]
         response = await self._call_llm(ctx.messages)
         ctx.current_response = response
-        ctx.messages.append({"role": "assistant", "content": response.content})
+        self._append_assistant(ctx, response)
 
-        if response.stop_reason == "tool_use":
+        if response.choices[0].finish_reason == "tool_calls":
             ctx.state = State.SELECT_TOOL
         else:
             ctx.state = State.FINALIZE
         return ctx
 
     def _select_tool(self, ctx: RunContext) -> RunContext:
+        msg = ctx.current_response.choices[0].message
         tool_calls = []
-        for block in ctx.current_response.content:
-            if block.type == "tool_use":
-                tool_calls.append(
-                    ToolCall(id=block.id, name=block.name, input=block.input)
+        for tc in msg.tool_calls:
+            tool_calls.append(
+                ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    input=json.loads(tc.function.arguments),
                 )
+            )
         ctx.pending_tool_calls = tool_calls
         ctx.state = State.CALL_TOOL
         return ctx
@@ -169,23 +176,18 @@ class Orchestrator:
         return ctx
 
     async def _observe(self, ctx: RunContext) -> RunContext:
-        tool_result_blocks = []
         for r in ctx.tool_results:
-            block = {
-                "type": "tool_result",
-                "tool_use_id": r.tool_use_id,
+            ctx.messages.append({
+                "role": "tool",
+                "tool_call_id": r.tool_use_id,
                 "content": r.content,
-            }
-            if r.is_error:
-                block["is_error"] = True
-            tool_result_blocks.append(block)
+            })
 
-        ctx.messages.append({"role": "user", "content": tool_result_blocks})
         response = await self._call_llm(ctx.messages)
         ctx.current_response = response
-        ctx.messages.append({"role": "assistant", "content": response.content})
+        self._append_assistant(ctx, response)
 
-        if response.stop_reason == "tool_use":
+        if response.choices[0].finish_reason == "tool_calls":
             ctx.state = State.SELECT_TOOL
         else:
             ctx.state = State.FINALIZE
@@ -206,22 +208,38 @@ class Orchestrator:
 
     # -- Helpers --
 
-    async def _call_llm(self, messages: list) -> anthropic.types.Message:
-        return await self.client.messages.create(
-            model=settings.model_name,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            tools=self.tool_schemas if self.tool_schemas else anthropic.NOT_GIVEN,
-            messages=messages,
-        )
+    async def _call_llm(self, messages: list):
+        kwargs = {
+            "model": settings.model_name,
+            "max_tokens": 1024,
+            "messages": messages,
+        }
+        if self.tool_schemas:
+            kwargs["tools"] = self.tool_schemas
+        return await self.client.chat.completions.create(**kwargs)
+
+    @staticmethod
+    def _append_assistant(ctx: RunContext, response) -> None:
+        msg = response.choices[0].message
+        entry: dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            entry["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        ctx.messages.append(entry)
 
     @staticmethod
     def _extract_text(response) -> str:
-        parts = []
-        for block in response.content:
-            if block.type == "text":
-                parts.append(block.text)
-        return "\n".join(parts)
+        content = response.choices[0].message.content
+        return content or ""
 
     @staticmethod
     def _extract_json(text: str) -> str:

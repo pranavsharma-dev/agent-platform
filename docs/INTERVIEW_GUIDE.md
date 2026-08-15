@@ -16,7 +16,7 @@ For quality, I built an evaluation harness with versioned test cases, determinis
 
 "Start with the API layer. A question comes in via POST /run to a FastAPI gateway. This creates a run record in Postgres and hands the question to the orchestrator.
 
-The orchestrator is an explicit state machine. It starts in PLAN — sends the question to Claude with available tool schemas. Claude either requests a tool or produces an answer. If it requests a tool, we go through SELECT_TOOL to parse the request, CALL_TOOL to execute it, and OBSERVE to feed the result back. This loop repeats until Claude produces a final answer.
+The orchestrator is an explicit state machine. It starts in PLAN — sends the question to GPT-4o-mini with available tool schemas. The model either requests a tool or produces an answer. If it requests a tool, we go through SELECT_TOOL to parse the request, CALL_TOOL to execute it, and OBSERVE to feed the result back. This loop repeats until the model produces a final answer.
 
 The final answer goes through FINALIZE, where we parse the JSON and validate it with Pydantic — answer string, citations list, confidence float. If validation fails, we retry once with the error message. If it fails again, the run fails.
 
@@ -40,7 +40,7 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 |--------|----------------|------|
 | "orchestration layer" | Explicit state machine with 7 states | `src/orchestrator.py` |
 | "multi-step LLM agent" | Agent loops through tool calls until answer | `src/orchestrator.py` |
-| "tool-calling" | Calculator, web_search, doc_lookup with JSON schemas | `src/tools/` |
+| "tool-calling" | Calculator (+ web_search, doc_lookup in Phase 2) with JSON schemas | `src/tools/` |
 | "retries" | *(Phase 2)* Exponential backoff, error classification | |
 | "structured outputs" | Pydantic AgentAnswer model (answer, citations, confidence) | `src/models.py` |
 | "per-step tracing" | *(Phase 3)* OpenTelemetry spans per state | |
@@ -76,7 +76,7 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 
 *What the interviewer is testing:* Can you trace the request lifecycle through your system?
 
-*Strong answer:* "POST /run hits FastAPI. We create a run record in Postgres with status 'running'. The orchestrator starts in PLAN — sends the question to Claude with tool schemas. Claude's response either has tool_use blocks (go to SELECT_TOOL → CALL_TOOL → OBSERVE → back to LLM) or a text response (go to FINALIZE). In FINALIZE, I parse the JSON from the text, validate it with Pydantic — answer, citations, confidence — and if valid, update the run record to 'completed' with the answer."
+*Strong answer:* "POST /run hits FastAPI. We create a run record in Postgres with status 'running'. The orchestrator starts in PLAN — sends the question to GPT-4o-mini with tool schemas. The response either has tool_calls (go to SELECT_TOOL → CALL_TOOL → OBSERVE → back to LLM) or a text response (go to FINALIZE). In FINALIZE, I parse the JSON from the text, validate it with Pydantic — answer, citations, confidence — and if valid, update the run record to 'completed' with the answer."
 
 ---
 
@@ -106,7 +106,7 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 ### Must know
 - What a state machine is and why the orchestrator uses one
 - How each state (PLAN, SELECT_TOOL, CALL_TOOL, OBSERVE, FINALIZE) works
-- How Anthropic's tool_use API works (tool schemas, tool_use blocks, tool_result messages)
+- How OpenAI's function-calling API works (tool schemas, tool_calls, tool role messages)
 - How Pydantic validates the agent's answer
 - Why eval() is dangerous and how the AST parser avoids the risk
 - The request lifecycle from POST /run to response
@@ -120,4 +120,4 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 ### Nice to know
 - Python AST module internals
 - asyncpg vs psycopg comparison
-- Anthropic API rate limiting behavior
+- OpenAI API rate limiting behavior

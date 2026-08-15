@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -5,27 +7,38 @@ from src.models import AgentAnswer
 from src.orchestrator import Orchestrator, OrchestratorError, State
 
 
-def _text_response(text: str, stop_reason: str = "end_turn"):
+def _text_response(text: str, finish_reason: str = "stop"):
+    """Mock an OpenAI ChatCompletion response with text content."""
     response = MagicMock()
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
-    response.content = [block]
-    response.stop_reason = stop_reason
-    response.usage = MagicMock(input_tokens=100, output_tokens=50)
+    message = MagicMock()
+    message.role = "assistant"
+    message.content = text
+    message.tool_calls = None
+    choice = MagicMock()
+    choice.message = message
+    choice.finish_reason = finish_reason
+    response.choices = [choice]
+    response.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
     return response
 
 
-def _tool_use_response(tool_name: str, tool_input: dict, tool_id: str = "toolu_01"):
+def _tool_use_response(tool_name: str, tool_input: dict, tool_id: str = "call_01"):
+    """Mock an OpenAI ChatCompletion response with a tool call."""
     response = MagicMock()
-    block = MagicMock()
-    block.type = "tool_use"
-    block.id = tool_id
-    block.name = tool_name
-    block.input = tool_input
-    response.content = [block]
-    response.stop_reason = "tool_use"
-    response.usage = MagicMock(input_tokens=100, output_tokens=50)
+    message = MagicMock()
+    message.role = "assistant"
+    message.content = None
+    tc = MagicMock()
+    tc.id = tool_id
+    tc.function = MagicMock()
+    tc.function.name = tool_name
+    tc.function.arguments = json.dumps(tool_input)
+    message.tool_calls = [tc]
+    choice = MagicMock()
+    choice.message = message
+    choice.finish_reason = "tool_calls"
+    response.choices = [choice]
+    response.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
     return response
 
 
@@ -36,8 +49,9 @@ class TestOrchestratorDirectAnswer:
     async def test_returns_answer_without_tools(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+        orchestrator.client.chat.completions.create = AsyncMock(
             return_value=_text_response(VALID_JSON_ANSWER)
         )
 
@@ -50,8 +64,9 @@ class TestOrchestratorDirectAnswer:
     async def test_handles_json_in_code_block(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+        orchestrator.client.chat.completions.create = AsyncMock(
             return_value=_text_response(f"```json\n{VALID_JSON_ANSWER}\n```")
         )
 
@@ -66,12 +81,13 @@ class TestOrchestratorWithTools:
         calculator = CalculatorTool()
         orchestrator = Orchestrator(tools={"calculator": calculator})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
 
         answer_json = (
             '{"answer": "25 times 47 is 1175", "citations": [], "confidence": 0.99}'
         )
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat.completions.create = AsyncMock(
             side_effect=[
                 _tool_use_response("calculator", {"expression": "25 * 47"}),
                 _text_response(answer_json),
@@ -82,17 +98,18 @@ class TestOrchestratorWithTools:
         assert result.answer == "25 times 47 is 1175"
         assert result.confidence == 0.99
 
-        assert orchestrator.client.messages.create.call_count == 2
+        assert orchestrator.client.chat.completions.create.call_count == 2
 
     async def test_handles_unknown_tool(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
 
         answer_json = (
             '{"answer": "I could not compute that", "citations": [], "confidence": 0.3}'
         )
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat.completions.create = AsyncMock(
             side_effect=[
                 _tool_use_response("nonexistent", {"x": 1}),
                 _text_response(answer_json),
@@ -108,28 +125,30 @@ class TestOrchestratorWithTools:
         calculator = CalculatorTool()
         orchestrator = Orchestrator(tools={"calculator": calculator})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
 
         answer_json = '{"answer": "Sum is 30", "citations": [], "confidence": 0.95}'
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat.completions.create = AsyncMock(
             side_effect=[
-                _tool_use_response("calculator", {"expression": "10 + 5"}, "t1"),
-                _tool_use_response("calculator", {"expression": "15 + 15"}, "t2"),
+                _tool_use_response("calculator", {"expression": "10 + 5"}, "c1"),
+                _tool_use_response("calculator", {"expression": "15 + 15"}, "c2"),
                 _text_response(answer_json),
             ]
         )
 
         result = await orchestrator.run("What is 10+5, then add 15?")
         assert result.answer == "Sum is 30"
-        assert orchestrator.client.messages.create.call_count == 3
+        assert orchestrator.client.chat.completions.create.call_count == 3
 
 
 class TestOrchestratorErrors:
     async def test_invalid_json_raises_error(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+        orchestrator.client.chat.completions.create = AsyncMock(
             return_value=_text_response("This is not JSON at all")
         )
 
@@ -139,9 +158,10 @@ class TestOrchestratorErrors:
     async def test_invalid_confidence_raises_error(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
         bad_json = '{"answer": "test", "citations": [], "confidence": 5.0}'
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat.completions.create = AsyncMock(
             return_value=_text_response(bad_json)
         )
 
@@ -151,8 +171,9 @@ class TestOrchestratorErrors:
     async def test_max_steps_exceeded(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+        orchestrator.client.chat.completions.create = AsyncMock(
             return_value=_tool_use_response("calculator", {"expression": "1+1"})
         )
 
@@ -171,8 +192,9 @@ class TestStateTransitions:
     async def test_direct_answer_transitions(self):
         orchestrator = Orchestrator(tools={})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+        orchestrator.client.chat.completions.create = AsyncMock(
             return_value=_text_response(VALID_JSON_ANSWER)
         )
 
@@ -193,10 +215,11 @@ class TestStateTransitions:
         calculator = CalculatorTool()
         orchestrator = Orchestrator(tools={"calculator": calculator})
         orchestrator.client = MagicMock()
-        orchestrator.client.messages = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
 
         answer_json = '{"answer": "5", "citations": [], "confidence": 0.9}'
-        orchestrator.client.messages.create = AsyncMock(
+        orchestrator.client.chat.completions.create = AsyncMock(
             side_effect=[
                 _tool_use_response("calculator", {"expression": "2+3"}),
                 _text_response(answer_json),

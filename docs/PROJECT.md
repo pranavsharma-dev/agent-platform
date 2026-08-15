@@ -37,7 +37,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md).
 | Database       | PostgreSQL          |
 | Cache          | Redis               |
 | Tracing        | OpenTelemetry SDK   |
-| LLM            | Anthropic SDK       |
+| LLM            | OpenAI SDK          |
 | Containers     | Docker + Compose    |
 | CI             | GitHub Actions      |
 | Validation     | Pydantic            |

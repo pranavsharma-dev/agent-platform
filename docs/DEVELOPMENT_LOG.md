@@ -14,7 +14,7 @@
 - Wrote 37 tests: calculator unit tests, orchestrator state machine tests (with mocked LLM), API endpoint tests
 
 **Technical observations:**
-- The orchestrator state machine maps cleanly to the Anthropic tool_use API flow: when `stop_reason == "tool_use"`, transition to SELECT_TOOL; when `stop_reason == "end_turn"`, transition to FINALIZE
+- The orchestrator state machine maps cleanly to the OpenAI function-calling API flow: when `finish_reason == "tool_calls"`, transition to SELECT_TOOL; when `finish_reason == "stop"`, transition to FINALIZE
 - JSON extraction from LLM text responses needs to handle multiple formats: raw JSON, markdown code blocks, JSON embedded in text. Implemented a brace-depth-tracking parser for robustness
 - pytest-asyncio with `asyncio_mode = "auto"` handles async test functions automatically — no need for explicit `@pytest.mark.asyncio` decorators
 - Docker Desktop was not running during initial development; all tests run without Docker by mocking the database layer
@@ -22,7 +22,7 @@
 **Decisions made:**
 - Explicit state machine over framework (see DECISION_LOG.md)
 - AST-based calculator over eval() (see DECISION_LOG.md)
-- Anthropic SDK over OpenAI (see DECISION_LOG.md)
+- OpenAI SDK over Anthropic (see DECISION_LOG.md)
 - asyncpg over SQLAlchemy (see DECISION_LOG.md)
 
 **Test results:**
