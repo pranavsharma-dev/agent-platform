@@ -57,3 +57,36 @@
 
 **Test results:**
 74/74 tests passed (38 existing + 36 new). All tests use mocked LLM and database.
+
+## Phase 3 — 2026-08-16
+
+### Session 1: Tracing + Cost Ledger
+
+**What happened:**
+- Created `spans` table in Postgres with columns: id, run_id, step_index, step_type, tool_name, input_json, output_json, tokens_in, tokens_out, cost_usd, cache_hit, latency_ms, started_at, ended_at. Added index on run_id.
+- Built `src/pricing.py` — static pricing table mapping model names to per-token input/output costs using Python Decimal for exact financial arithmetic. Covers gpt-4o-mini and gpt-4o (plus dated variants).
+- Added `SpanRecord` Pydantic model and `CostBreakdown` response model to `models.py`. Extended `RunResponse` with `total_cost_usd` and `spans` fields.
+- Added DB functions: `insert_span()`, `get_spans()`, `update_run_cost()`
+- Instrumented the orchestrator with OpenTelemetry spans — every state handler (_plan, _call_tool, _observe, _finalize, _repair_output) now records timing, token counts, and cost into `SpanData` records on `RunContext`
+- Added `_extract_usage()` static method to pull prompt_tokens/completion_tokens from OpenAI response objects
+- Orchestrator.run() now accepts optional `run_id` parameter — when provided, persists all spans to Postgres and updates `runs.total_cost_usd` after the loop completes
+- Enhanced `GET /runs/{id}` to include full trace (list of spans)
+- Added `GET /runs/{id}/cost` endpoint returning cost breakdown with per-span details and aggregate token counts
+- Wrote 17 new tests: 6 pricing tests, 8 tracing tests (span recording, cost accumulation, usage extraction), 3 API tests (spans in response, cost endpoint, cost 404)
+- Updated all existing API test mocks to include `get_spans` and `update_run_cost` patches
+
+**Technical observations:**
+- OpenAI response objects already include `usage.prompt_tokens` and `usage.completion_tokens` — no estimation needed, just extraction
+- Using Python `Decimal` for cost calculations avoids floating-point rounding errors that would accumulate across hundreds of eval runs
+- `time.perf_counter()` for latency measurement is more precise than `time.time()` — it's a monotonic clock not affected by system time changes
+- The existing test mocks already had `response.usage = MagicMock(prompt_tokens=100, completion_tokens=50)` — the mock pattern anticipated Phase 3
+- OTel spans wrap each handler for distributed tracing compatibility, while SpanData records capture the same data for Postgres persistence — the two paths are independent so we're not coupled to OTel for our own trace storage
+- Tool call spans have zero LLM cost (no tokens) but non-zero latency — important distinction for cost attribution
+
+**Decisions made:**
+- OpenTelemetry over custom logging (see DECISION_LOG.md)
+- Postgres span persistence over OTel Collector (see DECISION_LOG.md)
+- Static pricing table over API lookup (see DECISION_LOG.md)
+
+**Test results:**
+91/91 tests passed (74 existing + 17 new). All tests use mocked LLM and database.

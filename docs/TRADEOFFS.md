@@ -117,3 +117,51 @@
 - Lost: tenacity's features (jitter, retry-after headers, composable strategies)
 
 **When the alternative is better:** In a production system with multiple API integrations, tenacity's composable retry policies save duplication. For a single integration with simple needs, custom code is clearer.
+
+---
+
+## Postgres Span Storage vs. OTel Collector Pipeline
+
+**Problem:** Where to persist trace spans.
+
+**Options:**
+1. OTel Collector → Jaeger/Zipkin — standard pipeline, built-in visualization
+2. Custom Postgres table — spans alongside run records, queryable via our API
+
+**Chosen approach:** Postgres table.
+
+**Why:** The API is the interface. GET /runs/{id} must return spans. Postgres gives us SQL queryability (aggregate cost by tool, find slowest steps) and keeps everything in one database.
+
+**Tradeoffs:**
+- Gained: spans queryable via SQL and our API, no extra service, one database for everything
+- Lost: Jaeger's waterfall visualization, OTLP-standard span format, built-in sampling
+
+**When the alternative is better:** In a microservices system where multiple services emit spans and you need distributed trace visualization across services. For a single-service agent with an API-first interface, Postgres is simpler.
+
+**Interview question:** "How would you add distributed trace visualization?"
+
+**Interview answer:** "Add an OTLP exporter to the OTel SDK configuration — it's a one-line setup change. The OTel spans are already being created; I'd just add a second export destination alongside Postgres persistence. The two paths are independent."
+
+---
+
+## Decimal vs. Float for Cost Accounting
+
+**Problem:** How to represent monetary values in cost calculations.
+
+**Options:**
+1. Python float — simple, fast
+2. Python Decimal — exact decimal arithmetic, no rounding drift
+
+**Chosen approach:** Decimal everywhere (pricing table, compute_cost, database column).
+
+**Why:** Floating-point arithmetic accumulates rounding errors. Over hundreds of eval runs, small per-token costs compound. $0.000015 × 100 tokens should be exactly $0.0015, not $0.001499999999...
+
+**Tradeoffs:**
+- Gained: exact financial arithmetic, no drift across aggregation
+- Lost: minor code verbosity (Decimal("0.15") vs 0.15)
+
+**When the alternative is better:** If cost is purely informational (rough estimates, dashboards) and not used for regression detection, float is fine. Our CI gate (Phase 7) compares costs between runs — exact arithmetic matters.
+
+**Interview question:** "Why Decimal instead of float?"
+
+**Interview answer:** "The CI gate compares costs between eval runs — a 15% cost increase fails the build. If I use float, rounding drift across hundreds of eval cases could trigger false positives or mask real regressions. Decimal gives me exact arithmetic. The pricing table, compute_cost, and the database column all use Decimal."

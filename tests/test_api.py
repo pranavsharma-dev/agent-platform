@@ -19,6 +19,8 @@ def mock_db(no_db):
         patch("src.main.db.complete_run", new_callable=AsyncMock),
         patch("src.main.db.fail_run", new_callable=AsyncMock),
         patch("src.main.db.get_run", new_callable=AsyncMock) as mock_get,
+        patch("src.main.db.get_spans", new_callable=AsyncMock) as mock_spans,
+        patch("src.main.db.update_run_cost", new_callable=AsyncMock),
     ):
         mock_create.return_value = {"id": run_id, "created_at": created}
         mock_get.return_value = {
@@ -29,6 +31,7 @@ def mock_db(no_db):
             "status": "completed",
             "total_cost_usd": 0,
         }
+        mock_spans.return_value = []
         yield {"run_id": run_id, "created_at": created}
 
 
@@ -101,6 +104,74 @@ class TestGetRunEndpoint:
 
     async def test_get_nonexistent_run(self, client):
         fake_id = uuid4()
-        with patch("src.main.db.get_run", new_callable=AsyncMock, return_value=None):
+        with (
+            patch("src.main.db.get_run", new_callable=AsyncMock, return_value=None),
+            patch("src.main.db.get_spans", new_callable=AsyncMock, return_value=[]),
+        ):
             response = await client.get(f"/runs/{fake_id}")
+            assert response.status_code == 404
+
+    async def test_get_run_includes_spans(self, mock_db, client):
+        run_id = mock_db["run_id"]
+        created = mock_db["created_at"]
+        span_row = {
+            "id": uuid4(),
+            "run_id": run_id,
+            "step_index": 0,
+            "step_type": "plan",
+            "tool_name": None,
+            "input_json": '{"question": "test"}',
+            "output_json": '{"content": "answer"}',
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "cost_usd": 0.000045,
+            "cache_hit": False,
+            "latency_ms": 123.4,
+            "started_at": created,
+            "ended_at": created,
+        }
+        with patch("src.main.db.get_spans", new_callable=AsyncMock, return_value=[span_row]):
+            response = await client.get(f"/runs/{run_id}")
+            data = response.json()
+            assert len(data["spans"]) == 1
+            assert data["spans"][0]["step_type"] == "plan"
+            assert data["spans"][0]["tokens_in"] == 100
+
+
+class TestCostEndpoint:
+    async def test_cost_breakdown(self, mock_db, client):
+        run_id = mock_db["run_id"]
+        created = mock_db["created_at"]
+        span_row = {
+            "id": uuid4(),
+            "run_id": run_id,
+            "step_index": 0,
+            "step_type": "plan",
+            "tool_name": None,
+            "input_json": None,
+            "output_json": None,
+            "tokens_in": 200,
+            "tokens_out": 80,
+            "cost_usd": 0.000078,
+            "cache_hit": False,
+            "latency_ms": 250.0,
+            "started_at": created,
+            "ended_at": created,
+        }
+        with patch("src.main.db.get_spans", new_callable=AsyncMock, return_value=[span_row]):
+            response = await client.get(f"/runs/{run_id}/cost")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["run_id"] == str(run_id)
+            assert data["total_tokens_in"] == 200
+            assert data["total_tokens_out"] == 80
+            assert len(data["spans"]) == 1
+
+    async def test_cost_not_found(self, client):
+        fake_id = uuid4()
+        with (
+            patch("src.main.db.get_run", new_callable=AsyncMock, return_value=None),
+            patch("src.main.db.get_spans", new_callable=AsyncMock, return_value=[]),
+        ):
+            response = await client.get(f"/runs/{fake_id}/cost")
             assert response.status_code == 404

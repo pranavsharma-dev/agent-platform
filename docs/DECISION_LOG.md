@@ -233,6 +233,103 @@ Custom exponential backoff with error classification. Retry only retryable error
 
 ---
 
+## Decision: OpenTelemetry for Tracing Over Custom Logging
+
+### Context
+Phase 3 adds per-step tracing to the orchestrator. Need to choose how to create and manage spans for each step.
+
+### Options considered
+1. **Custom logging** — structured log lines with step data (JSON logs)
+2. **OpenTelemetry SDK** — industry-standard tracing API with span context
+3. **Datadog/New Relic SDK** — vendor-specific APM
+
+### Decision
+OpenTelemetry SDK (opentelemetry-api + opentelemetry-sdk).
+
+### Why
+- Industry standard — same API regardless of backend (Jaeger, Zipkin, OTLP)
+- Span context propagation is built in — parent/child relationships come free
+- Attributes on spans give us structured metadata (tokens, cost, latency) without parsing logs
+- Adding an exporter later (Jaeger, console) is a one-line config change
+- Interview-friendly: OTel is the answer hiring managers expect for "how do you observe your services"
+
+### Tradeoffs
+- Two new dependencies (opentelemetry-api, opentelemetry-sdk)
+- We persist spans to our own Postgres table rather than shipping to an OTel collector — means we get queryable traces via our API but don't get the Jaeger/Zipkin UI for free
+- OTel SDK has a learning curve (tracers, spans, attributes, context propagation)
+
+### Interview question
+"Why OpenTelemetry instead of just structured logging?"
+
+### Interview answer
+"Structured logs give you searchable events, but not the parent-child relationships that make a trace. OpenTelemetry gives me spans with context propagation — the root span is the agent run, and each step (plan, tool_call, observe) is a child span. I can see the full tree of what happened, with timing, token counts, and cost as span attributes. I persist the spans to Postgres so they're queryable via my own API, but I could add a Jaeger exporter in one line if I wanted the UI."
+
+---
+
+## Decision: Postgres Span Persistence Over OTel Collector
+
+### Context
+OTel spans need to go somewhere. Options are an external collector/backend or our own database.
+
+### Options considered
+1. **OTel Collector → Jaeger** — standard pipeline, rich visualization UI
+2. **Persist to Postgres** — spans table alongside runs, queryable via our API
+3. **Both** — dual export
+
+### Decision
+Persist to Postgres only. No external collector.
+
+### Why
+- The project's value proposition is that traces are queryable via the API — GET /runs/{id} returns spans, GET /runs/{id}/cost returns cost breakdown
+- Adding Jaeger would mean another Docker service, another dependency, another thing to explain in an interview
+- The spans table gives us full SQL queryability — aggregate cost by tool, find slowest steps, etc.
+- If we wanted Jaeger later, adding an exporter is additive, not a migration
+
+### Tradeoffs
+- No Jaeger/Zipkin visualization UI — traces are JSON via the API, not a waterfall diagram
+- Must write our own persistence code instead of using OTel's built-in exporters
+- Span data format is ours, not the OTLP standard — less portable
+
+### Interview question
+"Why not use Jaeger for visualization?"
+
+### Interview answer
+"The traces need to be accessible via the API — that's the 'inspectable and attributable' claim. Persisting to Postgres means GET /runs/{id} returns the full trace with token counts and costs. Adding Jaeger would give me a nice waterfall UI but add another service to manage. The span data is in Postgres alongside the run record, so I can join them, aggregate costs, and build any view I need. If I wanted Jaeger, I'd add an OTLP exporter — it's additive."
+
+---
+
+## Decision: Static Pricing Table Over API-Based Pricing
+
+### Context
+Need to compute per-step cost from token counts. Pricing data has to come from somewhere.
+
+### Options considered
+1. **Hardcoded table** — dict mapping model names to per-token prices
+2. **API lookup** — fetch current pricing from OpenAI at runtime
+3. **Config file** — pricing in YAML/JSON, editable without code changes
+
+### Decision
+Hardcoded static dict in `src/pricing.py`.
+
+### Why
+- OpenAI has no pricing API — there's no endpoint to query current prices
+- Pricing changes rarely (quarterly at most) — a dict update is a one-line code change
+- No external dependency, no failure mode, no caching needed
+- Uses Decimal for exact arithmetic — no floating-point rounding on financial calculations
+
+### Tradeoffs
+- Must manually update when OpenAI changes prices
+- Only includes models we actually use (gpt-4o-mini, gpt-4o)
+- Unknown models return $0 cost rather than erroring
+
+### Interview question
+"What happens when OpenAI changes their pricing?"
+
+### Interview answer
+"I update two lines in the pricing dict and redeploy. OpenAI doesn't have a pricing API, so there's no way to fetch current prices at runtime. The pricing table uses Python Decimal for exact arithmetic — I don't want floating-point rounding errors accumulating across hundreds of eval runs."
+
+---
+
 ## Decision: Structured Output Repair via LLM Feedback
 
 ### Context

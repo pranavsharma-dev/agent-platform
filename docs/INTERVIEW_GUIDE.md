@@ -43,10 +43,10 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 | "tool-calling" | Calculator, web_search, doc_lookup via BaseTool registry | `src/tools/` |
 | "retries" | Exponential backoff (1s, 2s, 4s), error classification | `src/orchestrator.py`, `src/errors.py` |
 | "structured outputs" | Pydantic AgentAnswer + output repair (feed error back to LLM) | `src/models.py`, `src/orchestrator.py` |
-| "per-step tracing" | *(Phase 3)* OpenTelemetry spans per state | |
-| "token/cost accounting" | *(Phase 3)* Cost ledger: tokens × price per step | |
-| "inspectable" | GET /runs/{id} returns full run details | `src/main.py` |
-| "attributable" | *(Phase 3)* Per-step cost breakdown | |
+| "per-step tracing" | OTel spans + SpanData per state handler | `src/orchestrator.py` |
+| "token/cost accounting" | Static pricing table, Decimal arithmetic | `src/pricing.py` |
+| "inspectable" | GET /runs/{id} returns full trace with spans | `src/main.py` |
+| "attributable" | GET /runs/{id}/cost returns per-span cost breakdown | `src/main.py` |
 
 ## Resume Bullet 2 Defense
 
@@ -163,3 +163,67 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 - asyncpg vs psycopg comparison
 - OpenAI API rate limiting behavior
 - Python ABC mechanics (@abstractmethod, @property)
+
+---
+
+## Interview Questions — Phase 3
+
+### Tracing
+
+**Q: How do you make agent runs observable?**
+
+*What the interviewer is testing:* Do you understand observability beyond logging?
+
+*Strong answer:* "Every orchestrator step — plan, tool_call, observe, finalize — creates two things: an OpenTelemetry span for distributed tracing compatibility, and a SpanData record that I persist to Postgres. Each span captures step_type, tokens_in, tokens_out, cost_usd, latency_ms, and timestamps. GET /runs/{id} returns the full trace — you can see exactly what the agent did, in what order, how long each step took, and what it cost."
+
+---
+
+**Q: Why OpenTelemetry instead of just structured logging?**
+
+*Strong answer:* "Structured logs give me searchable events, but not parent-child relationships. OTel gives me spans with context propagation — the root span is the agent run, each step is a child. I get a trace tree with timing. I also persist spans to Postgres for API access, so I have both the OTel standard and queryable SQL storage."
+
+---
+
+**Q: Why persist spans to Postgres instead of using Jaeger?**
+
+*Strong answer:* "The API is the interface. GET /runs/{id} returns spans alongside the run record. Jaeger would require another service and give me a separate UI, but the traces need to be programmatically accessible for the CI gate in Phase 7. SQL also lets me aggregate — cost by tool type, average latency by step, slowest runs. Adding a Jaeger exporter later is one line of config."
+
+---
+
+### Cost Accounting
+
+**Q: How do you track cost per run?**
+
+*Strong answer:* "After each LLM call, I extract prompt_tokens and completion_tokens from the OpenAI response's usage field. I multiply by the model's per-token price from a static pricing table — Decimal arithmetic to avoid floating-point drift. Each span records its own cost_usd, and the total accumulates on the run record. GET /runs/{id}/cost returns the per-span breakdown."
+
+---
+
+**Q: Why Decimal instead of float for cost?**
+
+*Strong answer:* "The CI gate in Phase 7 compares costs between eval runs — a 15% increase fails the build. With float, rounding drift across hundreds of cases could trigger false positives or mask real regressions. Decimal gives exact arithmetic from the pricing table through aggregation."
+
+---
+
+**Q: What happens when OpenAI changes their prices?**
+
+*Strong answer:* "I update two lines in the pricing dict and redeploy. OpenAI has no pricing API, so I can't fetch current prices at runtime. The table only includes models I actually use. Unknown models return zero cost rather than erroring — this is a deliberate choice so a model name change doesn't crash the agent."
+
+---
+
+## What I Must Personally Know (Phase 3)
+
+### Must know
+- What an OTel span is and how parent/child relationships work
+- How token counts are extracted from OpenAI responses (usage.prompt_tokens, usage.completion_tokens)
+- How cost is calculated (tokens × price / 1M, Decimal arithmetic)
+- The spans table schema and what each column stores
+- How to explain the trace for a typical run (plan → tool_call → observe → finalize)
+- Why Postgres over Jaeger for span storage
+- Why Decimal over float for cost
+
+### Should know
+- The difference between opentelemetry-api and opentelemetry-sdk
+- How time.perf_counter() differs from time.time()
+- How OTel exporters work (console, OTLP, Jaeger)
+- How span attributes are set and queried
+- The cost difference between GPT-4o-mini and GPT-4o ($0.15/M vs $2.50/M input)

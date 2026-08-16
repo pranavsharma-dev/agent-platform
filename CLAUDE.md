@@ -55,7 +55,10 @@ Skeleton with working orchestrator, calculator tool, validated structured output
 ### Phase 2 — COMPLETE ✓
 Tool registry with base abstraction, 3 tools (calculator, web_search stub, doc_lookup), retry with exponential backoff, error classification, structured output repair.
 
-**74/74 tests passing** (mocked LLM and DB — no external services needed for tests).
+### Phase 3 — COMPLETE ✓
+OpenTelemetry tracing, per-step span recording, static pricing table with Decimal arithmetic, token extraction from OpenAI responses, cost accumulation, spans table in Postgres, enhanced GET /runs/{id} with full trace, new GET /runs/{id}/cost endpoint.
+
+**91/91 tests passing** (mocked LLM and DB — no external services needed for tests).
 
 ### What Exists
 
@@ -69,15 +72,16 @@ agent-platform/
 ├── requirements.txt
 ├── pyproject.toml
 ├── db/
-│   └── init.sql                 # runs table
+│   └── init.sql                 # runs + spans tables
 ├── src/
 │   ├── __init__.py
 │   ├── config.py                # pydantic-settings, env-based
-│   ├── models.py                # AgentAnswer, Citation, RunRequest, RunResponse, RunStatus
-│   ├── db.py                    # asyncpg pool, create/complete/fail/get run
+│   ├── models.py                # AgentAnswer, Citation, SpanRecord, CostBreakdown, RunRequest, RunResponse
+│   ├── db.py                    # asyncpg pool, CRUD for runs + spans
 │   ├── errors.py                # Error classification: retryable vs non-retryable
-│   ├── orchestrator.py          # ★ State machine + retry wrapper + output repair
-│   ├── main.py                  # FastAPI: POST /run, GET /runs/{id}, GET /health
+│   ├── pricing.py               # Static pricing table, compute_cost() with Decimal
+│   ├── orchestrator.py          # ★ State machine + retry + repair + OTel tracing + cost
+│   ├── main.py                  # FastAPI: POST /run, GET /runs/{id}, GET /runs/{id}/cost, GET /health
 │   └── tools/
 │       ├── __init__.py          # Tool registry: build_tool_map()
 │       ├── base.py              # BaseTool ABC with Pydantic input validation
@@ -95,23 +99,26 @@ agent-platform/
 │   ├── conftest.py              # no_db fixture
 │   ├── test_calculator.py       # 18 tests
 │   ├── test_orchestrator.py     # 17 tests (mocked LLM)
-│   ├── test_api.py              # 7 tests (mocked DB + orchestrator)
+│   ├── test_api.py              # 10 tests (mocked DB + orchestrator)
 │   ├── test_web_search.py       # 6 tests
 │   ├── test_doc_lookup.py       # 8 tests
 │   ├── test_errors.py           # 12 tests
-│   └── test_tool_registry.py    # 3 tests
+│   ├── test_tool_registry.py    # 3 tests
+│   ├── test_pricing.py          # 6 tests
+│   └── test_tracing.py          # 8 tests (span recording, cost, usage)
 └── docs/
     ├── PROJECT.md
     ├── ARCHITECTURE.md
-    ├── DECISION_LOG.md           # 9 decisions documented
+    ├── DECISION_LOG.md           # 12 decisions documented
     ├── DEVELOPMENT_LOG.md
     ├── FAILURE_LOG.md
-    ├── TRADEOFFS.md              # 5 tradeoffs documented
+    ├── TRADEOFFS.md              # 7 tradeoffs documented
     ├── GLOSSARY.md
     ├── INTERVIEW_GUIDE.md
     └── PHASES/
         ├── phase-01.md
-        └── phase-02.md
+        ├── phase-02.md
+        └── phase-03.md
 ```
 
 ### Key Architectural Decisions Made
@@ -125,17 +132,20 @@ agent-platform/
 7. **Custom exponential backoff** — transparent retry, no library dependency
 8. **Error classification** — retryable vs non-retryable based on OpenAI exception hierarchy
 9. **Output repair with error feedback** — feed specific Pydantic error back to LLM
+10. **OpenTelemetry for tracing** — industry standard, span context propagation, backend-agnostic
+11. **Postgres for span storage** — API-queryable traces over Jaeger, no extra service
+12. **Static pricing table with Decimal** — exact financial arithmetic, no floating-point drift
 
 ### Database Schema (Current)
 
 ```sql
 runs(id UUID PK, created_at TIMESTAMPTZ, input_question TEXT, final_answer JSONB, status TEXT, total_cost_usd NUMERIC)
+spans(id UUID PK, run_id UUID FK, step_index INT, step_type TEXT, tool_name TEXT, input_json JSONB, output_json JSONB, tokens_in INT, tokens_out INT, cost_usd NUMERIC, cache_hit BOOL, latency_ms REAL, started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)
 ```
 
 ### Planned Schema (Future Phases)
 
 ```sql
-spans(id, run_id, step_type, tool_name, input_json, output_json, tokens_in, tokens_out, cost_usd, cache_hit, latency_ms, started_at, ended_at)
 eval_runs(id, git_sha, created_at, aggregate_score, aggregate_cost_usd, passed)
 eval_case_results(id, eval_run_id, case_id, deterministic_score, judge_score, passed)
 judge_calibration(id, eval_case_result_id, human_label, judge_label, agree)
