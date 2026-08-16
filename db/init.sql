@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS runs (
     input_question TEXT NOT NULL,
     final_answer JSONB,
     status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
     total_cost_usd NUMERIC(10, 6) DEFAULT 0
 );
 

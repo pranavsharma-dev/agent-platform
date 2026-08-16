@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -88,6 +88,26 @@ class TestRunEndpoint:
             data = response.json()
             assert data["status"] == "failed"
             assert data["error"] == "LLM failed"
+
+    async def test_raw_exception_still_fails_run(self, mock_db, client):
+        """Non-OrchestratorError exceptions must not leave runs stuck at 'running'."""
+        from openai import AuthenticationError
+
+        with patch("src.main._build_orchestrator") as mock_build:
+            orch = AsyncMock()
+            orch.run = AsyncMock(
+                side_effect=AuthenticationError(
+                    message="Invalid API key",
+                    response=MagicMock(status_code=401, headers={}),
+                    body=None,
+                )
+            )
+            mock_build.return_value = orch
+
+            response = await client.post("/run", json={"question": "test"})
+            data = response.json()
+            assert data["status"] == "failed"
+            assert "Invalid API key" in data["error"]
 
     async def test_missing_question_returns_422(self, client):
         response = await client.post("/run", json={})

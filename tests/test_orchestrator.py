@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from openai import APITimeoutError
 
 from src.models import AgentAnswer
-from src.orchestrator import Orchestrator, OrchestratorError, State
+from src.orchestrator import Orchestrator, OrchestratorError, State, RunContext
 
 
 def _text_response(text: str, finish_reason: str = "stop"):
@@ -394,3 +394,23 @@ class TestStructuredOutputRepair:
 
         result = await orchestrator.run("test")
         assert result.answer == "42"
+
+
+class TestExtractJson:
+    def test_handles_braces_inside_string_values(self):
+        text = '{"answer": "Use {braces} like {this}", "citations": [], "confidence": 0.9}'
+        result = Orchestrator._extract_json(text)
+        parsed = json.loads(result)
+        assert parsed["answer"] == "Use {braces} like {this}"
+
+    def test_handles_escaped_quotes_in_strings(self):
+        text = r'{"answer": "He said \"hello {world}\"", "citations": [], "confidence": 0.8}'
+        result = Orchestrator._extract_json(text)
+        parsed = json.loads(result)
+        assert parsed["confidence"] == 0.8
+
+    def test_handles_nested_json_objects(self):
+        text = '{"answer": "test", "citations": [{"source": "a", "text": "b"}], "confidence": 0.7}'
+        result = Orchestrator._extract_json(text)
+        parsed = json.loads(result)
+        assert len(parsed["citations"]) == 1

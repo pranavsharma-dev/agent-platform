@@ -357,3 +357,191 @@ Repair with error feedback. One retry attempt. If the repair also fails validati
 
 ### Interview answer
 "Pydantic catches it — confidence must be between 0.0 and 1.0. Instead of failing the run, I append a message to the conversation: 'Your response couldn't be parsed. Error: confidence must be ≤ 1.0. Please respond with only a valid JSON object.' Then I call the LLM again. It now has the original conversation plus the specific validation error, so it can fix the exact issue. If the second attempt also fails validation, then the run fails. One retry, specific feedback, capped cost."
+
+---
+
+## Decision: Content-Hash Cache in Redis
+
+### Context
+The agent makes LLM API calls that cost money. Identical questions produce identical orchestrator steps. If the same step (same type + same input) runs again, we should return the cached result instead of paying for another API call.
+
+### Options considered
+1. **No cache** — every run calls the LLM
+2. **In-memory dict** — fast, but lost on restart, no sharing across instances
+3. **Redis with content-hash keys** — SHA-256 of (step_type + normalized_input) as key, JSON-serialized response as value, 1-hour TTL
+
+### Decision
+Redis with content-hash keys.
+
+### Why
+- SHA-256 makes the key deterministic and collision-resistant
+- Step_type in the key prevents cross-step collisions (plan vs observe with the same data)
+- JSON.dumps with sort_keys=True ensures key-order-independent normalization
+- Redis is already in the stack (docker-compose.yml)
+- 1-hour TTL balances cost savings vs. freshness
+- Graceful degradation: if Redis is down, cache_get returns None and the agent runs normally
+
+### Tradeoffs
+- Extra latency per step (~1ms Redis roundtrip) even on misses — negligible vs. LLM call latency
+- Stale results possible within the TTL window — acceptable for this use case
+- Cache key includes the full messages list for observe/repair steps — large keys hash fine but large values consume Redis memory
+- Using MagicMock to reconstruct cached responses — works but isn't typed
+
+### Failure modes
+- Redis down: graceful degradation, no cache, agent runs normally
+- Corrupted cache entry: JSON decode failure caught, returns None, LLM called
+- TTL too short: more cache misses, more LLM calls (tunable)
+- TTL too long: stale answers served (1 hour is a safe default)
+
+### Alternative implementation
+An in-memory LRU cache (functools.lru_cache) would be simpler but wouldn't survive process restarts, wouldn't be shared across instances, and wouldn't support TTL.
+
+### Interview question
+"How does the cache work?"
+
+### Interview answer
+"Before each LLM call, I compute a SHA-256 hash of the step type plus the normalized input — JSON.dumps with sorted keys. I check Redis for that key. On a hit, I reconstruct the response from the cached data — the content, any tool calls, finish reason, and token counts — and skip the API call entirely. Cost for that step is zero. On a miss, I call the LLM, serialize the response, and store it with a 1-hour TTL. If Redis is down, the agent runs normally without caching."
+
+---
+
+## Decision: Cache at Step Level, Not Run Level
+
+### Context
+Could cache entire runs (same question → same answer) or individual steps (same step input → same step output).
+
+### Options considered
+1. **Run-level cache** — cache the final answer for a complete question
+2. **Step-level cache** — cache each LLM call independently
+
+### Decision
+Step-level cache.
+
+### Why
+- A multi-step run might share some steps with a previous run but diverge later — step-level caching captures partial reuse
+- Step-level cache is composable: same plan step can be reused even if later steps differ
+- Aligns with the per-step cost accounting — cache_hit is a span-level attribute
+
+### Tradeoffs
+- More cache entries than run-level (multiple keys per run)
+- Slightly more complex integration (each handler checks cache independently)
+- Run-level would be simpler but misses partial reuse
+
+### Interview question
+"Why not cache the whole run?"
+
+### Interview answer
+"Step-level caching captures partial reuse. If the same question triggers the same plan and calculator call but the observe step diverges, I still save the plan call's cost. Run-level caching is all-or-nothing — a slightly different conversation path means a full cache miss."
+
+---
+
+## Decision: Graceful Degradation on Cache Failure
+
+### Context
+Redis might be down or unreachable. The cache should not become a single point of failure.
+
+### Options considered
+1. **Fail the run** — raise if Redis is unavailable
+2. **Graceful degradation** — catch exceptions, log, proceed without cache
+3. **Circuit breaker** — stop trying cache after N failures
+
+### Decision
+Graceful degradation with logging.
+
+### Why
+- The cache is a performance optimization, not a correctness requirement
+- The agent must work without caching (tests run without Redis)
+- Logging the failure provides visibility without blocking the run
+- A circuit breaker adds complexity for minimal benefit at this scale
+
+### Interview question
+"What happens if Redis goes down?"
+
+### Interview answer
+"The agent keeps running. cache_get returns None on any exception — it's treated as a cache miss. cache_set fails silently with a warning log. The cost is higher because every step calls the LLM, but no runs fail. This was a deliberate design choice — the cache is a cost optimization, not a correctness dependency."
+
+---
+
+## Decision: Broad Exception Handling at API Boundary
+
+### Context
+Found during a Phase 4 self-audit: `POST /run` only caught `OrchestratorError`, but `_call_llm` can raise raw OpenAI SDK exceptions (`AuthenticationError`, `APITimeoutError` after retry exhaustion). These propagated as HTTP 500s and left run records permanently stuck at `status='running'`.
+
+### Options considered
+1. **Wrap `_call_llm`'s final raise** in `OrchestratorError` — keep the catch clause narrow
+2. **Broaden the except clause** to `Exception` at the API boundary — catch everything
+
+### Decision
+Broaden to `except Exception` at the API boundary.
+
+### Why
+- The API boundary is the last line of defense — no exception should leave a run stuck
+- Wrapping in `_call_llm` would hide the original exception type in logs
+- `logger.exception()` preserves the full traceback for debugging
+- The run always transitions to `status='failed'` with an error message
+
+### Tradeoffs
+- Catches everything, including truly unexpected errors (e.g., programming bugs) — but a stuck run with no error is worse than a failed run with an error message
+- Could mask bugs that should crash the process — mitigated by `logger.exception()` which logs the full traceback
+
+### Interview question
+"What happens if the OpenAI API key is wrong?"
+
+### Interview answer
+"The orchestrator's retry logic classifies `AuthenticationError` as non-retryable and raises immediately. The API handler catches it with a broad `except Exception`, logs the full traceback, marks the run as failed with the error message, and returns a clean JSON response. I found this gap during a self-audit — originally the handler only caught my own `OrchestratorError` type, which meant raw SDK exceptions left runs stuck at 'running' forever. I confirmed it by running the stack with a bad API key and checking the database."
+
+---
+
+## Decision: Consolidate Cache Logic into _cached_llm_call Helper
+
+### Context
+After implementing Phase 4 cache integration, three handlers (`_plan`, `_observe`, `_repair_output`) each had a near-identical 8-line block: compute cache key → check → hit/miss → build mock or call LLM → store. Found during Phase 4 self-audit as tech debt.
+
+### Options considered
+1. **Keep inline** — three copies, each handler is self-contained
+2. **Extract to `_cached_llm_call` helper** — one function returns `(response, tokens_in, tokens_out, hit)`
+3. **Decorator on `_call_llm`** — transparent caching
+
+### Decision
+Extract to `_cached_llm_call` helper method.
+
+### Why
+- Eliminates three copies of the same logic — one place to fix bugs
+- Returns a tuple that the caller destructures — explicit, no hidden behavior
+- A decorator would hide the cache key computation, making it harder to explain and debug
+
+### Tradeoffs
+- Callers must pass both `cache_input` (for key) and `messages` (for LLM call) — slight signature complexity
+- The helper doesn't record spans or set OTel attributes — callers still handle that, which keeps span logic visible
+
+### Interview question
+"Why not use a decorator for caching?"
+
+### Interview answer
+"The cache key depends on the step type and a normalized input dict that varies per handler — `_plan` uses the question, `_observe` uses the full messages list. A decorator couldn't determine the right key without the handler telling it what to hash. The helper takes the step type and cache input explicitly, which keeps the key computation visible and testable."
+
+---
+
+## Decision: Zero Tokens on Cache-Hit Spans
+
+### Context
+Cache-hit spans originally stored the historical token counts from the run that first populated the cache. This inflated `CostBreakdown.total_tokens_in/out` even though zero API calls were made.
+
+### Options considered
+1. **Keep historical tokens** — span shows what the response "cost" originally, useful for debugging
+2. **Zero out tokens** — span reflects actual API usage (0 calls = 0 tokens)
+3. **Split into actual vs. represented** — two fields on CostBreakdown
+
+### Decision
+Zero out tokens on cache hits.
+
+### Why
+- `total_tokens_in/out` should reconcile with real OpenAI billing — historical tokens don't
+- `cost_usd=0` already correctly reflects no API call; tokens should match
+- The cached entry still stores the original token counts internally for response reconstruction
+- Adding a second set of fields would complicate the API for a niche use case
+
+### Interview question
+"Does your token count reconcile with your OpenAI billing dashboard?"
+
+### Interview answer
+"Yes, now it does. Cache-hit spans report zero tokens because no API call was made. The cost is zero too. Originally I stored the historical token counts from the first run, which inflated the totals — I caught that in a self-audit and fixed it."

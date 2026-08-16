@@ -165,3 +165,96 @@
 **Interview question:** "Why Decimal instead of float?"
 
 **Interview answer:** "The CI gate compares costs between eval runs — a 15% cost increase fails the build. If I use float, rounding drift across hundreds of eval cases could trigger false positives or mask real regressions. Decimal gives me exact arithmetic. The pricing table, compute_cost, and the database column all use Decimal."
+
+---
+
+## Step-Level Cache vs. Run-Level Cache
+
+**Problem:** Where to place the cache boundary — cache whole runs or individual steps?
+
+**Options:**
+1. Run-level cache — same question → return cached final answer
+2. Step-level cache — same step_type + same input → return cached step result
+
+**Chosen approach:** Step-level cache.
+
+**Why:** Partial reuse. A multi-step run might share the plan step with a previous run but diverge at the observe step. Step-level caching saves the plan call's cost even when later steps differ.
+
+**Tradeoffs:**
+- Gained: partial reuse across runs, composable cache, aligns with per-step cost model
+- Lost: simplicity (multiple cache checks per run vs. one), more Redis entries
+
+**When the alternative is better:** If questions are always identical end-to-end (no tool variance), run-level caching is simpler and equally effective.
+
+**Interview question:** "Why not cache the whole run?"
+
+**Interview answer:** "Step-level caching captures partial reuse. If two runs share the same plan step but diverge at observe, I still save the plan call's cost. Run-level is all-or-nothing — any difference in the conversation path means a full miss."
+
+---
+
+## Redis Cache vs. In-Memory Cache
+
+**Problem:** Where to store cached LLM responses.
+
+**Options:**
+1. In-memory dict/LRU — fast, no dependency, process-local
+2. Redis — shared across instances, survives restarts, TTL support
+
+**Chosen approach:** Redis.
+
+**Why:** Redis is already in the stack (docker-compose), supports TTL natively, and would work across multiple app instances. In-memory caches are lost on restart.
+
+**Tradeoffs:**
+- Gained: TTL support, persistence across restarts, shared across instances
+- Lost: ~1ms latency per check (vs. nanosecond in-memory), requires Redis to be running
+
+**When the alternative is better:** Single-instance, short-lived processes where restart frequency is low. functools.lru_cache would be simpler.
+
+**Interview question:** "Why not just use an in-memory cache?"
+
+**Interview answer:** "Redis was already in the stack, so no new infrastructure. It gives me TTL-based expiration for free, survives process restarts, and would scale to multiple instances. The ~1ms Redis roundtrip is negligible compared to a ~500ms LLM call."
+
+---
+
+## Broad Exception Catch vs. Typed Exception Hierarchy
+
+**Problem:** Raw OpenAI SDK exceptions (not wrapped in `OrchestratorError`) propagated through the API handler and left run records stuck at `status='running'` forever.
+
+**Options:**
+1. Wrap every `_call_llm` raise in `OrchestratorError` — keep the API catch clause narrow
+2. Broaden the API catch clause to `except Exception` — catch everything at the boundary
+
+**Chosen approach:** Broad catch at the API boundary.
+
+**Why:** The API boundary is the last line of defense. No exception — regardless of type — should leave a run stuck without an error message. Wrapping in `_call_llm` would hide the original exception type in logs, making debugging harder.
+
+**Tradeoffs:**
+- Gained: no run can ever get stuck, full traceback via `logger.exception()`, clean error response to client
+- Lost: any exception — including programming bugs — is caught instead of crashing. Could mask logic errors.
+
+**When the alternative is better:** In a service with a proper exception hierarchy where every external SDK call is wrapped at the integration boundary. That's the "right" design for a larger system, but requires maintaining the wrapper as the SDK evolves. At this scale, the broad catch is simpler and safer.
+
+**Interview question:** "Isn't catching Exception too broad? Won't it mask bugs?"
+
+**Interview answer:** "It could, but the alternative is worse. A stuck run with no error message is invisible — it looks like it's still processing. A failed run with an error message is observable. I log the full exception with traceback, so no information is lost. The tradeoff is clear: I'd rather have a run that says 'failed: TypeError on line 42' than one that sits at 'running' forever."
+
+---
+
+## Cache-Hit Tokens: Zero vs. Historical
+
+**Problem:** Cache-hit spans stored the original run's token counts even though no API call was made, inflating aggregate token totals in CostBreakdown.
+
+**Options:**
+1. Report historical tokens — shows what the response "would have cost"
+2. Report zero tokens — reflects actual API usage
+3. Report both — add `actual_tokens` and `notional_tokens` fields
+
+**Chosen approach:** Zero tokens on cache hits.
+
+**Why:** `total_tokens_in/out` should reconcile with the OpenAI billing dashboard. If you made zero API calls, your aggregate token count should be zero. `cost_usd=0` was already correct; tokens should match.
+
+**Tradeoffs:**
+- Gained: token totals reconcile with real API billing, simpler mental model
+- Lost: can't see how many tokens a cache hit "saved" by looking at the span alone (though you can infer it from the cached entry's stored data)
+
+**When the alternative is better:** If you need to report "tokens saved by caching" as a metric. In that case, add a separate field rather than overloading `tokens_in`/`tokens_out` with two different meanings.

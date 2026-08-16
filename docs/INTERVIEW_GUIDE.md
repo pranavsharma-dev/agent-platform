@@ -52,7 +52,13 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 
 > Shipped a regression-eval harness — versioned eval sets, deterministic graders plus an LLM judge calibrated against human labels — wired into CI to gate merges, catching quality and cost regressions before release; a content-hash cache cuts repeat-call cost on unchanged steps.
 
-*(To be completed in Phases 4–7)*
+| Phrase | Implementation | File |
+|--------|----------------|------|
+| "content-hash cache" | SHA-256 of (step_type + normalized_input) | `src/cache.py` |
+| "cuts repeat-call cost" | Cache hit → cost = $0, LLM not called | `src/orchestrator.py` |
+| "on unchanged steps" | Same step + same input = same key = hit | `src/cache.py`, `src/orchestrator.py` |
+
+*(Remaining phrases to be completed in Phases 5–7)*
 
 ---
 
@@ -227,3 +233,105 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 - How OTel exporters work (console, OTLP, Jaeger)
 - How span attributes are set and queried
 - The cost difference between GPT-4o-mini and GPT-4o ($0.15/M vs $2.50/M input)
+
+---
+
+## Interview Questions — Phase 4
+
+### Caching
+
+**Q: How does the cache work?**
+
+*What the interviewer is testing:* Do you understand content-addressable caching and can you explain the key generation strategy?
+
+*Strong answer:* "Before each LLM call, I compute a SHA-256 hash of the step type plus the normalized input — JSON.dumps with sorted keys so key order doesn't matter. I check Redis for that key. On a hit, I reconstruct the response from cached data and skip the API call entirely — cost is zero. On a miss, I call the LLM, serialize the response, and store it with a 1-hour TTL. If Redis is down, cache_get returns None and the agent runs normally."
+
+---
+
+**Q: Why cache at the step level instead of caching the whole run?**
+
+*Strong answer:* "Partial reuse. A multi-step run might share the plan step with a previous run but diverge at the observe step — maybe the tool returned slightly different results. Step-level caching saves the plan call's cost even when later steps differ. Run-level is all-or-nothing."
+
+---
+
+**Q: What happens if Redis goes down?**
+
+*What the interviewer is testing:* Resilience design, failure modes.
+
+*Strong answer:* "The agent keeps running. cache_get catches any exception, logs a warning, and returns None — which is treated as a cache miss. cache_set fails silently. Every run costs more because we call the LLM every time, but no runs fail. The cache is a cost optimization, not a correctness dependency."
+
+---
+
+**Q: How do you normalize the cache input?**
+
+*Strong answer:* "json.dumps with sort_keys=True and compact separators. This ensures that {'a': 1, 'b': 2} and {'b': 2, 'a': 1} produce the same hash. The step_type is prepended to prevent collisions — a plan step and an observe step with the same messages get different cache keys."
+
+---
+
+**Q: Why Redis instead of an in-memory cache?**
+
+*Strong answer:* "Redis was already in the docker-compose stack. It gives me TTL-based expiration, persistence across process restarts, and would work across multiple app instances. The ~1ms roundtrip is negligible compared to a ~500ms LLM call."
+
+---
+
+## What I Must Personally Know (Phase 4)
+
+### Must know
+- How the cache key is generated (SHA-256 of step_type + normalized JSON)
+- What gets cached (LLM responses) and what doesn't (tool calls, parsing)
+- The cache flow: check → hit/miss → reconstruct or store
+- Why step-level over run-level (partial reuse)
+- Why Redis over in-memory (TTL, restarts, multi-instance)
+- What graceful degradation means and why the cache isn't a correctness dependency
+- How cache_hit=True on a span means cost=$0
+
+### Should know
+- How json.dumps sort_keys=True ensures deterministic serialization
+- How SHA-256 properties (deterministic, collision-resistant) make it suitable for cache keys
+- How the mock response is reconstructed from cached data
+- Redis TTL behavior (key expires, next access is a miss)
+- The hiredis C extension and why it's used (performance)
+- Why the tool-call ID doesn't break cache correctness across runs
+- Why cache-hit spans report zero tokens (reconciles with real API billing)
+
+---
+
+## Interview Questions — Post-Audit Fixes
+
+### Error Handling
+
+**Q: What happens if the OpenAI API key is wrong or rate-limited?**
+
+*What the interviewer is testing:* Do you understand your system's failure modes? Can you be honest about gaps you found and fixed?
+
+*Strong answer:* "The retry logic classifies AuthenticationError as non-retryable and raises immediately. The API handler catches it with a broad except Exception, logs the full traceback, marks the run as failed with the error message, and returns a clean JSON response. I found this gap during a self-audit — originally the handler only caught my own OrchestratorError type, which meant raw SDK exceptions left runs stuck at 'running' forever with no error message. I confirmed it by running the stack with a bad API key and checking the database row."
+
+*Follow-up:* "How did you find this bug?"
+
+*Answer:* "I traced the full POST /run failure path by hand during a Phase 4 audit, then reproduced it live against the real Docker stack. The run row was stuck at status='running' with error_message=NULL. All 117 tests passed while this bug existed — because the test for failed runs only mocked OrchestratorError, never a raw SDK exception. That's a concrete example of how mocking at the wrong level gives false confidence."
+
+---
+
+**Q: Why catch Exception instead of just OrchestratorError?**
+
+*Strong answer:* "The API boundary is the last line of defense — a stuck run with no error message is worse than a broadly-caught exception. I log the full traceback with logger.exception(), so no diagnostic information is lost. The alternative — wrapping every _call_llm raise in OrchestratorError — would hide the original exception type in logs. At this scale, the broad catch is simpler and more resilient."
+
+---
+
+### Cache Subtleties
+
+**Q: Walk me through why the tool-call ID from a previous run doesn't break the cache on the next run.**
+
+*What the interviewer is testing:* Do you understand the non-obvious correctness properties of your cache design?
+
+*Strong answer:* "When the plan step hits cache, I reconstruct a mock response carrying the exact tool-call ID that was cached. That ID flows unchanged through _select_tool, gets attached to the tool result in _call_tool, and ends up in ctx.messages for the observe step in the same shape as the original run. Since the observe cache key is a hash of the full messages list, and that list is now byte-identical to the original, the observe step also hits cache. I verified this with an integration test using a real in-memory Redis stand-in, not just mocked cache_get."
+
+*Follow-up:* "What if a tool returns non-deterministic results?"
+
+*Answer:* "The observe step's cache key naturally changes because the tool result text differs — clean cache miss, not a wrong answer. The content-hash approach fails safe: worst case is more LLM calls, never stale answers."
+
+---
+
+**Q: Does your token count reconcile with OpenAI billing?**
+
+*Strong answer:* "Yes. Cache-hit spans report zero tokens because no API call was made. Originally I stored the historical token counts from the first run, which inflated the aggregate. I caught that in a self-audit and fixed it — the CostBreakdown now accurately reflects real API token consumption."

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 
-from src import db
+from src import cache, db
 from src.models import (
     AgentAnswer,
     CostBreakdown,
@@ -15,16 +15,19 @@ from src.models import (
     RunStatus,
     SpanRecord,
 )
-from src.orchestrator import Orchestrator, OrchestratorError
+from src.orchestrator import Orchestrator
 from src.tools import build_tool_map
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
+    await cache.init_redis()
     yield
+    await cache.close_redis()
     await db.close_db()
 
 
@@ -93,13 +96,15 @@ async def run_agent(request: RunRequest):
             total_cost_usd=total_cost,
             spans=spans,
         )
-    except OrchestratorError as e:
-        await db.fail_run(run_id, str(e))
+    except Exception as e:
+        error_msg = str(e)
+        logger.exception("run %s failed: %s", run_id, error_msg)
+        await db.fail_run(run_id, error_msg)
         return RunResponse(
             run_id=run_id,
             status=RunStatus.FAILED,
             question=request.question,
-            error=str(e),
+            error=error_msg,
             created_at=created_at,
         )
 
@@ -124,6 +129,7 @@ async def get_run(run_id: UUID):
         status=RunStatus(row["status"]),
         question=row["input_question"],
         answer=answer,
+        error=row.get("error_message"),
         created_at=row["created_at"],
         total_cost_usd=row.get("total_cost_usd", Decimal("0")),
         spans=spans,

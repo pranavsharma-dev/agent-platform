@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 from opentelemetry import trace
 from pydantic import ValidationError
 
+from src.cache import cache_get, cache_key, cache_set
 from src.config import settings
 from src.errors import is_retryable
 from src.models import AgentAnswer
@@ -50,6 +51,15 @@ class ToolResult:
     tool_use_id: str
     content: str
     is_error: bool = False
+
+
+@dataclass
+class CachedResponse:
+    content: str | None
+    tool_calls: list[dict] | None
+    finish_reason: str
+    tokens_in: int
+    tokens_out: int
 
 
 @dataclass
@@ -184,20 +194,24 @@ class Orchestrator:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": ctx.question},
             ]
-            response = await self._call_llm(ctx.messages)
+
+            response, tokens_in, tokens_out, hit = await self._cached_llm_call(
+                "plan", {"question": ctx.question}, ctx.messages
+            )
+
             ctx.current_response = response
             self._append_assistant(ctx, response)
 
             latency_ms = (time.perf_counter() - t0) * 1000
             ended_at = datetime.now(timezone.utc)
-            tokens_in, tokens_out = self._extract_usage(response)
-            cost = compute_cost(settings.model_name, tokens_in, tokens_out)
+            cost = Decimal("0") if hit else compute_cost(settings.model_name, tokens_in, tokens_out)
 
             span.set_attribute("step_type", "plan")
             span.set_attribute("tokens_in", tokens_in)
             span.set_attribute("tokens_out", tokens_out)
             span.set_attribute("cost_usd", float(cost))
             span.set_attribute("latency_ms", latency_ms)
+            span.set_attribute("cache_hit", hit)
 
             ctx.span_records.append(SpanData(
                 step_index=ctx.steps,
@@ -207,6 +221,7 @@ class Orchestrator:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost_usd=cost,
+                cache_hit=hit,
                 latency_ms=latency_ms,
                 started_at=started_at,
                 ended_at=ended_at,
@@ -314,20 +329,23 @@ class Orchestrator:
                     "content": r.content,
                 })
 
-            response = await self._call_llm(ctx.messages)
+            response, tokens_in, tokens_out, hit = await self._cached_llm_call(
+                "observe", {"messages": ctx.messages}, ctx.messages
+            )
+
             ctx.current_response = response
             self._append_assistant(ctx, response)
 
             latency_ms = (time.perf_counter() - t0) * 1000
             ended_at = datetime.now(timezone.utc)
-            tokens_in, tokens_out = self._extract_usage(response)
-            cost = compute_cost(settings.model_name, tokens_in, tokens_out)
+            cost = Decimal("0") if hit else compute_cost(settings.model_name, tokens_in, tokens_out)
 
             span.set_attribute("step_type", "observe")
             span.set_attribute("tokens_in", tokens_in)
             span.set_attribute("tokens_out", tokens_out)
             span.set_attribute("cost_usd", float(cost))
             span.set_attribute("latency_ms", latency_ms)
+            span.set_attribute("cache_hit", hit)
 
             ctx.span_records.append(SpanData(
                 step_index=ctx.steps,
@@ -337,6 +355,7 @@ class Orchestrator:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost_usd=cost,
+                cache_hit=hit,
                 latency_ms=latency_ms,
                 started_at=started_at,
                 ended_at=ended_at,
@@ -394,7 +413,10 @@ class Orchestrator:
         })
 
         try:
-            response = await self._call_llm(ctx.messages)
+            response, tokens_in, tokens_out, hit = await self._cached_llm_call(
+                "repair", {"messages": ctx.messages}, ctx.messages
+            )
+
             ctx.current_response = response
             self._append_assistant(ctx, response)
             text = self._extract_text(response)
@@ -403,8 +425,7 @@ class Orchestrator:
             ctx.answer = AgentAnswer(**data)
             ctx.state = State.COMPLETE
 
-            tokens_in, tokens_out = self._extract_usage(response)
-            cost = compute_cost(settings.model_name, tokens_in, tokens_out)
+            cost = Decimal("0") if hit else compute_cost(settings.model_name, tokens_in, tokens_out)
 
             latency_ms = (time.perf_counter() - t0) * 1000
             ended_at = datetime.now(timezone.utc)
@@ -417,6 +438,7 @@ class Orchestrator:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost_usd=cost,
+                cache_hit=hit,
                 latency_ms=latency_ms,
                 started_at=started_at,
                 ended_at=ended_at,
@@ -429,6 +451,70 @@ class Orchestrator:
         return ctx
 
     # -- Helpers --
+
+    async def _cached_llm_call(
+        self, step_type: str, cache_input: dict, messages: list
+    ) -> tuple[object, int, int, bool]:
+        """Check cache before calling LLM. Returns (response, tokens_in, tokens_out, cache_hit)."""
+        key = cache_key(step_type, cache_input)
+        cached = await cache_get(key)
+        if cached is not None:
+            cr = CachedResponse(**cached)
+            return self._build_mock_response(cr), 0, 0, True
+        response = await self._call_llm(messages)
+        tokens_in, tokens_out = self._extract_usage(response)
+        await cache_set(key, self._serialize_response(response, tokens_in, tokens_out))
+        return response, tokens_in, tokens_out, False
+
+    @staticmethod
+    def _serialize_response(response, tokens_in: int, tokens_out: int) -> dict:
+        msg = response.choices[0].message
+        tool_calls = None
+        if msg.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+                for tc in msg.tool_calls
+            ]
+        return {
+            "content": msg.content,
+            "tool_calls": tool_calls,
+            "finish_reason": response.choices[0].finish_reason,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+        }
+
+    @staticmethod
+    def _build_mock_response(cr: CachedResponse):
+        from unittest.mock import MagicMock
+
+        response = MagicMock()
+        message = MagicMock()
+        message.content = cr.content
+        if cr.tool_calls:
+            tcs = []
+            for tc_data in cr.tool_calls:
+                tc = MagicMock()
+                tc.id = tc_data["id"]
+                tc.function = MagicMock()
+                tc.function.name = tc_data["name"]
+                tc.function.arguments = tc_data["arguments"]
+                tcs.append(tc)
+            message.tool_calls = tcs
+        else:
+            message.tool_calls = None
+        choice = MagicMock()
+        choice.message = message
+        choice.finish_reason = cr.finish_reason
+        response.choices = [choice]
+        response.usage = MagicMock(
+            prompt_tokens=cr.tokens_in,
+            completion_tokens=cr.tokens_out,
+        )
+        return response
 
     async def _call_llm(self, messages: list):
         kwargs = {
@@ -505,10 +591,24 @@ class Orchestrator:
         brace_start = text.find("{")
         if brace_start >= 0:
             depth = 0
+            in_string = False
+            escape_next = False
             for i in range(brace_start, len(text)):
-                if text[i] == "{":
+                ch = text[i]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
                     depth += 1
-                elif text[i] == "}":
+                elif ch == "}":
                     depth -= 1
                     if depth == 0:
                         return text[brace_start : i + 1]

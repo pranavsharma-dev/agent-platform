@@ -58,13 +58,17 @@ Tool registry with base abstraction, 3 tools (calculator, web_search stub, doc_l
 ### Phase 3 — COMPLETE ✓
 OpenTelemetry tracing, per-step span recording, static pricing table with Decimal arithmetic, token extraction from OpenAI responses, cost accumulation, spans table in Postgres, enhanced GET /runs/{id} with full trace, new GET /runs/{id}/cost endpoint.
 
-**91/91 tests passing** (mocked LLM and DB — no external services needed for tests).
+### Phase 4 — COMPLETE ✓
+Content-hash cache in Redis. SHA-256 of (step_type + normalized_input) as cache key. Cache hit skips LLM call, cost=$0. Cache miss stores result with 1-hour TTL. Graceful degradation when Redis is down. Verification script demonstrates cost savings.
+
+**118/118 tests passing** (mocked LLM, DB, and Redis — no external services needed for tests).
 
 ### What Exists
 
 ```
 agent-platform/
 ├── CLAUDE.md                    # This file
+├── .dockerignore                # Excludes .env, .git, tests, docs from Docker image
 ├── .gitignore
 ├── .env.example
 ├── docker-compose.yml           # Postgres 16, Redis 7, app
@@ -80,7 +84,8 @@ agent-platform/
 │   ├── db.py                    # asyncpg pool, CRUD for runs + spans
 │   ├── errors.py                # Error classification: retryable vs non-retryable
 │   ├── pricing.py               # Static pricing table, compute_cost() with Decimal
-│   ├── orchestrator.py          # ★ State machine + retry + repair + OTel tracing + cost
+│   ├── cache.py                 # Redis client, SHA-256 cache key, get/set with TTL
+│   ├── orchestrator.py          # ★ State machine + retry + repair + OTel tracing + cost + cache
 │   ├── main.py                  # FastAPI: POST /run, GET /runs/{id}, GET /runs/{id}/cost, GET /health
 │   └── tools/
 │       ├── __init__.py          # Tool registry: build_tool_map()
@@ -98,27 +103,31 @@ agent-platform/
 │   ├── __init__.py
 │   ├── conftest.py              # no_db fixture
 │   ├── test_calculator.py       # 18 tests
-│   ├── test_orchestrator.py     # 17 tests (mocked LLM)
-│   ├── test_api.py              # 10 tests (mocked DB + orchestrator)
+│   ├── test_orchestrator.py     # 20 tests (mocked LLM)
+│   ├── test_cache.py            # 23 tests (cache key, get/set, integration)
+│   ├── test_api.py              # 11 tests (mocked DB + orchestrator)
 │   ├── test_web_search.py       # 6 tests
 │   ├── test_doc_lookup.py       # 8 tests
 │   ├── test_errors.py           # 12 tests
 │   ├── test_tool_registry.py    # 3 tests
 │   ├── test_pricing.py          # 6 tests
 │   └── test_tracing.py          # 8 tests (span recording, cost, usage)
+├── scripts/
+│   └── verify_cache.py          # Phase 4 verification: same question twice, shows cost savings
 └── docs/
     ├── PROJECT.md
     ├── ARCHITECTURE.md
-    ├── DECISION_LOG.md           # 12 decisions documented
+    ├── DECISION_LOG.md           # 18 decisions documented
     ├── DEVELOPMENT_LOG.md
     ├── FAILURE_LOG.md
-    ├── TRADEOFFS.md              # 7 tradeoffs documented
+    ├── TRADEOFFS.md              # 11 tradeoffs documented
     ├── GLOSSARY.md
     ├── INTERVIEW_GUIDE.md
     └── PHASES/
         ├── phase-01.md
         ├── phase-02.md
-        └── phase-03.md
+        ├── phase-03.md
+        └── phase-04.md
 ```
 
 ### Key Architectural Decisions Made
@@ -135,11 +144,17 @@ agent-platform/
 10. **OpenTelemetry for tracing** — industry standard, span context propagation, backend-agnostic
 11. **Postgres for span storage** — API-queryable traces over Jaeger, no extra service
 12. **Static pricing table with Decimal** — exact financial arithmetic, no floating-point drift
+13. **Content-hash cache in Redis** — SHA-256 of step_type + normalized input, 1-hour TTL
+14. **Step-level caching over run-level** — enables partial reuse across runs
+15. **Graceful cache degradation** — Redis failure → cache miss, agent runs normally
+16. **Broad exception catch at API boundary** — no run gets stuck, full traceback logged
+17. **Consolidated _cached_llm_call helper** — eliminates three duplicate cache-check blocks
+18. **Zero tokens on cache-hit spans** — token totals reconcile with real API billing
 
 ### Database Schema (Current)
 
 ```sql
-runs(id UUID PK, created_at TIMESTAMPTZ, input_question TEXT, final_answer JSONB, status TEXT, total_cost_usd NUMERIC)
+runs(id UUID PK, created_at TIMESTAMPTZ, input_question TEXT, final_answer JSONB, status TEXT, error_message TEXT, total_cost_usd NUMERIC)
 spans(id UUID PK, run_id UUID FK, step_index INT, step_type TEXT, tool_name TEXT, input_json JSONB, output_json JSONB, tokens_in INT, tokens_out INT, cost_usd NUMERIC, cache_hit BOOL, latency_ms REAL, started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)
 ```
 
@@ -152,19 +167,6 @@ judge_calibration(id, eval_case_result_id, human_label, judge_label, agree)
 ```
 
 ## Remaining Phases
-
-### Phase 3 — Tracing + Cost Ledger
-- OpenTelemetry SDK spans for every orchestrator step (plan, tool call, LLM call)
-- Span attributes: step type, tool name, tokens in/out, latency, cache hit/miss
-- Persist spans to PostgreSQL (spans table)
-- Static pricing table, per-step cost calculation
-- GET /runs/{id} returns full trace, GET /runs/{id}/cost returns cost breakdown
-
-### Phase 4 — Content-Hash Cache
-- SHA-256 of (step_type + normalized_input) → Redis key
-- Cache hit: skip call, return cached output, cost = $0
-- Cache miss: execute, store result, TTL = 1 hour
-- Verification script: same input twice, second run costs less
 
 ### Phase 5 — Eval Harness
 - Versioned dataset: evals/v1/cases.yaml (50–100 cases, created by Pranav)

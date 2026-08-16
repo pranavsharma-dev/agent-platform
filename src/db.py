@@ -50,8 +50,9 @@ async def fail_run(run_id: UUID, error: str) -> None:
     assert _pool is not None
     async with _pool.acquire() as conn:
         await conn.execute(
-            "UPDATE runs SET status = $1 WHERE id = $2",
+            "UPDATE runs SET status = $1, error_message = $2 WHERE id = $3",
             RunStatus.FAILED.value,
+            error,
             run_id,
         )
 

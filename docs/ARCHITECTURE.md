@@ -1,16 +1,22 @@
 # Architecture
 
-## Current State (Phase 3)
+## Current State (Phase 4)
 
 ```mermaid
 graph TD
     A[POST /run] --> B[FastAPI Gateway]
     B --> C[Orchestrator State Machine]
-    C --> D{LLM Response}
+    C --> CA{Cache Check}
+    CA -->|HIT| CB[CachedResponse]
+    CB --> D
+    CA -->|MISS| CC[Call LLM API]
+    CC --> CD[Store in Redis]
+    CD --> D
+    D{LLM Response}
     D -->|tool_calls| E[SELECT_TOOL]
     E --> F[CALL_TOOL]
     F --> G[OBSERVE]
-    G --> D
+    G --> CA
     D -->|end_turn| H[FINALIZE]
     H --> I[Pydantic Validation]
     I -->|valid| J[Return AgentAnswer]
@@ -24,7 +30,7 @@ graph TD
     M -.-> P[Doc Lookup]
     B --> Q[(PostgreSQL)]
 
-    C -->|LLM call| R{Retry Policy}
+    CC -->|with retry| R{Retry Policy}
     R -->|retryable error| R
     R -->|non-retryable| L
     R -->|success| D
@@ -33,6 +39,9 @@ graph TD
     S -->|persist| T[(spans table)]
     S -->|cost| U[Pricing Ledger]
     U -->|total| Q
+
+    CA -.-> V[(Redis Cache)]
+    CD -.-> V
 ```
 
 ## Request Lifecycle
@@ -40,9 +49,12 @@ graph TD
 1. Client sends `POST /run` with a question
 2. FastAPI creates a `runs` record in Postgres (status: running)
 3. Orchestrator starts in PLAN state — sends question to GPT-4o-mini with tool schemas
-4. LLM call goes through retry wrapper (exponential backoff, max 3 attempts)
-5. **Each step records a SpanData**: step_type, tokens, cost, latency, timestamps
-6. The model either:
+4. **Before each LLM call, check content-hash cache** in Redis (SHA-256 of step_type + normalized input)
+   - Cache hit: return cached response, cost = $0, skip API call
+   - Cache miss: proceed to LLM call, store result with 1-hour TTL
+5. LLM call goes through retry wrapper (exponential backoff, max 3 attempts)
+6. **Each step records a SpanData**: step_type, tokens, cost, latency, cache_hit, timestamps
+7. The model either:
    - Calls a tool → SELECT_TOOL → CALL_TOOL → OBSERVE → back to LLM
    - Returns text → FINALIZE
 7. FINALIZE parses JSON from the model's text response, validates with Pydantic
@@ -151,19 +163,36 @@ spans(
     tokens_in INTEGER,     -- from OpenAI response.usage
     tokens_out INTEGER,
     cost_usd NUMERIC,      -- computed via static pricing table
-    cache_hit BOOLEAN,     -- always FALSE until Phase 4
+    cache_hit BOOLEAN,     -- TRUE when step served from Redis cache
     latency_ms REAL,
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ
 )
 ```
 
-## Components (Phase 3)
+## Content-Hash Cache (Phase 4)
+
+```
+Before each LLM call:
+    key = SHA-256(step_type + JSON.dumps(input, sort_keys=True))
+    cached = Redis.GET("cache:{key}")
+
+    HIT:  → CachedResponse → mock response → cost=$0, cache_hit=True
+    MISS: → call LLM → serialize response → Redis.SET(key, response, TTL=3600)
+
+Cached step types: plan, observe, repair
+Not cached: tool_call (local, free), finalize (parsing, free), select_tool (parsing, free)
+
+Graceful degradation: Redis down → cache_get returns None → normal LLM call
+```
+
+## Components (Phase 4)
 
 | Component        | File                       | Purpose                                    |
 |------------------|----------------------------|--------------------------------------------|
 | API Gateway      | `src/main.py`              | FastAPI app, endpoints, span parsing       |
-| Orchestrator     | `src/orchestrator.py`      | State machine, LLM interaction, retry, repair, tracing |
+| Orchestrator     | `src/orchestrator.py`      | State machine, LLM interaction, retry, repair, tracing, caching |
+| Cache            | `src/cache.py`             | Redis client, SHA-256 key gen, get/set with TTL |
 | Pricing          | `src/pricing.py`           | Static per-token cost calculation          |
 | Base Tool        | `src/tools/base.py`        | Abstract tool contract with input validation |
 | Calculator       | `src/tools/calculator.py`  | Safe math expression evaluator             |
@@ -177,7 +206,6 @@ spans(
 
 ## Planned Components (Future Phases)
 
-- Content-hash Redis cache (Phase 4)
 - Evaluation harness + graders + LLM judge (Phase 5)
 - Human calibration workflow (Phase 6)
 - CI regression gate (Phase 7)
