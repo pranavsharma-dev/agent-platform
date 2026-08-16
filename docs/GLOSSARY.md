@@ -15,14 +15,23 @@ LLM output that conforms to a predefined schema (JSON with specific fields and t
 ## Pydantic
 A Python library for data validation using type annotations. We define models like `AgentAnswer(answer: str, citations: list[Citation], confidence: float)` and Pydantic validates that LLM output matches the schema.
 
+## Base Tool
+An abstract base class that defines the contract for all tools: `name`, `description`, `input_model()`, `schema()`, `__call__()`, `execute()`. The `__call__` method validates input via Pydantic before delegating to `execute()`.
+
+## Tool Registry
+A module (`src/tools/__init__.py`) that lists all available tool classes and provides `build_tool_map()` to instantiate them keyed by name. Adding a new tool means adding its class to one list.
+
+## Structured Output Repair
+When the LLM's final JSON answer fails Pydantic validation, the orchestrator feeds the specific error message back to the LLM and asks it to fix the output. One retry attempt. Implemented in `_repair_output()`.
+
 ## Retryable Error
-*(Phase 2)* An error that may succeed if tried again — timeouts, rate limits, transient network failures.
+An error that may succeed if tried again — timeouts, rate limits, transient network failures. Classified by `is_retryable()` in `src/errors.py`.
 
 ## Non-Retryable Error
-*(Phase 2)* An error that will fail every time — invalid input schema, malformed request, authentication failure. Retrying wastes money.
+An error that will fail every time — invalid input schema, malformed request, authentication failure. Retrying wastes money. Raises immediately.
 
 ## Exponential Backoff
-*(Phase 2)* A retry strategy where wait time increases exponentially: 1s, 2s, 4s, 8s... Prevents overwhelming a service that's already struggling.
+A retry strategy where wait time increases exponentially: 1s, 2s, 4s. Prevents overwhelming a service that's already struggling. Implemented in `_call_llm()` with max 3 attempts.
 
 ## OpenTelemetry
 *(Phase 3)* An open standard for distributed tracing. Defines traces (end-to-end request flows) and spans (individual operations within a trace).

@@ -136,3 +136,127 @@ Raw asyncpg with plain SQL queries.
 
 ### Interview answer
 "The schema is deliberately small — six tables at most. An ORM adds abstraction I'd need to explain but doesn't solve a real problem at this scale. With asyncpg, every query is visible SQL, the connection pooling is built in, and it's the fastest Python Postgres driver. If the project grew to 30+ tables, I'd add SQLAlchemy for the migration tooling alone."
+
+---
+
+## Decision: Base Tool Abstraction with Pydantic Input Validation
+
+### Context
+Phase 1 had only one tool (calculator) with an ad-hoc interface. Phase 2 adds two more tools and needs a consistent contract.
+
+### Options considered
+1. **No abstraction** — each tool is a standalone class with its own interface
+2. **ABC with JSON Schema validation** — `jsonschema` library validates input dicts
+3. **ABC with Pydantic input models** — each tool defines a Pydantic model for its input
+
+### Decision
+ABC with Pydantic input models. Each tool implements `input_model()` returning a Pydantic class. The base class `__call__` validates input through the model before calling `execute()`.
+
+### Why
+- Pydantic is already a dependency (used for AgentAnswer)
+- Input validation happens automatically before execute() — tools can't receive invalid input
+- `model_json_schema()` generates the OpenAI function schema directly — no manual JSON Schema maintenance
+- Type safety: execute() receives a validated Pydantic model, not a raw dict
+
+### Tradeoffs
+- Tools must define a Pydantic model even for simple inputs (minor boilerplate)
+- Tight coupling between validation and Pydantic (acceptable since it's already in the stack)
+
+### Interview question
+"Why Pydantic for tool input validation instead of JSON Schema?"
+
+### Interview answer
+"Pydantic was already in the project for structured output validation, so no new dependency. It gives me three things at once: input validation before execute(), automatic JSON Schema generation for the OpenAI function-calling format, and type-safe execute() methods that receive validated models instead of raw dicts. The base class __call__ method validates input, so tool implementations can't accidentally receive bad data."
+
+---
+
+## Decision: Deterministic Stub for Web Search Tool
+
+### Context
+The agent needs a web search tool to exercise multi-tool reasoning, but real search APIs return different results over time.
+
+### Options considered
+1. **Real API** (Google, Bing, SerpAPI) — live results, realistic behavior
+2. **Deterministic stub** — canned results for known queries, empty for unknown
+
+### Decision
+Deterministic stub with canned results.
+
+### Why
+- Evaluation reliability: the eval harness (Phase 5) needs reproducible results to detect regressions
+- Cost: real search APIs cost money per query; stubs are free
+- Test stability: tests don't break when search results change
+- The tool's purpose is to demonstrate multi-tool orchestration, not to be a production search engine
+
+### Tradeoffs
+- No real search results — the agent can only "find" things in the canned dataset
+- Doesn't exercise error handling for real API failures (but the retry wrapper handles that generically)
+
+### Interview question
+"Why not use a real search API?"
+
+### Interview answer
+"Eval reliability. If search results change between eval runs, I can't tell whether a quality regression came from my code or from different search results. The stub gives me reproducible inputs so the eval harness isolates my agent's behavior. In production I'd swap in a real API — the tool interface is the same."
+
+---
+
+## Decision: Exponential Backoff with Error Classification
+
+### Context
+LLM API calls fail transiently — timeouts, rate limits, server errors. Need a retry strategy.
+
+### Options considered
+1. **No retry** — fail immediately on any error
+2. **Fixed delay retry** — wait N seconds, retry up to K times
+3. **Exponential backoff** — delay doubles each attempt (1s, 2s, 4s)
+4. **Library-based** (tenacity) — decorator-based retry with backoff
+
+### Decision
+Custom exponential backoff with error classification. Retry only retryable errors (timeout, rate limit, connection, HTTP 5xx). Raise immediately on non-retryable errors (bad request, auth failure, validation).
+
+### Why
+- Exponential backoff reduces thundering herd on rate-limited services
+- Error classification prevents wasting money retrying errors that will never succeed
+- Custom implementation keeps the retry logic visible and interview-defensible — no library to explain
+- Max 3 attempts balances reliability vs. latency
+
+### Tradeoffs
+- No jitter (could add if needed, but overkill for single-client agent)
+- No per-error-type backoff tuning (rate limit errors could respect Retry-After header)
+- Custom code instead of tenacity — more to maintain, but more transparent
+
+### Interview question
+"Why not use tenacity for retries?"
+
+### Interview answer
+"I wanted the retry logic to be visible, not hidden in a decorator. The error classification — is this retryable or not — is specific to the OpenAI SDK's exception hierarchy, and I wanted to be able to explain every branch. The whole retry wrapper is about 15 lines. Tenacity would save those 15 lines but add a dependency I'd need to explain."
+
+---
+
+## Decision: Structured Output Repair via LLM Feedback
+
+### Context
+When the LLM's final answer fails Pydantic validation (e.g., confidence: 5.0), Phase 1 failed the entire run. Phase 2 needs to recover.
+
+### Options considered
+1. **Fail the run** — current behavior, simplest
+2. **Retry silently** — call LLM again with the same prompt
+3. **Repair with error feedback** — send the Pydantic error message back to the LLM and ask it to fix the output
+
+### Decision
+Repair with error feedback. One retry attempt. If the repair also fails validation, fail the run.
+
+### Why
+- The Pydantic error message is specific: "confidence must be ≤ 1.0". Feeding this back gives the LLM the exact information it needs to fix the output.
+- Silent retry without feedback is unlikely to produce a different result
+- One retry caps the additional cost at one extra LLM call
+
+### Tradeoffs
+- One extra LLM call on validation failure (cost: ~$0.001 for GPT-4o-mini)
+- If the LLM consistently produces invalid output, the repair won't help — but that's a prompt engineering problem, not an infrastructure one
+
+### Interview question
+"Walk me through what happens when the LLM returns confidence: 5.0."
+
+### Interview answer
+"Pydantic catches it — confidence must be between 0.0 and 1.0. Instead of failing the run, I append a message to the conversation: 'Your response couldn't be parsed. Error: confidence must be ≤ 1.0. Please respond with only a valid JSON object.' Then I call the LLM again. It now has the original conversation plus the specific validation error, so it can fix the exact issue. If the second attempt also fails validation, then the run fails. One retry, specific feedback, capped cost."

@@ -72,3 +72,48 @@
 **Interview question:** "What would you add if the schema grew to 30 tables?"
 
 **Interview answer:** "Alembic for migrations, first. Then SQLAlchemy Core (not the ORM) for query composition — I want the query builder without the identity map and session tracking overhead. For a schema this small, raw SQL is clearer."
+
+---
+
+## Deterministic Stub vs. Real Search API
+
+**Problem:** The agent needs web search capability, but evaluation requires reproducible results.
+
+**Options:**
+1. Real search API (SerpAPI, Google) — realistic results, but non-deterministic
+2. Deterministic stub — canned results for known queries
+
+**Chosen approach:** Deterministic stub.
+
+**Why:** Eval reliability. The same input must produce the same output across eval runs, or you can't distinguish code regressions from data changes.
+
+**Tradeoffs:**
+- Gained: reproducible eval results, zero API cost, fast execution, test stability
+- Lost: realistic search behavior, coverage of API error handling edge cases
+
+**When the alternative is better:** In production or when testing real search quality. The tool interface is the same — swapping in a real API is a single class change.
+
+**Interview question:** "How would you switch to a real search API?"
+
+**Interview answer:** "Create a new class that extends BaseTool with the same name and interface, implement execute() with the real API call, and swap it in the registry. The orchestrator doesn't know or care — it calls tools through the abstract interface. For eval, I'd keep the stub to maintain reproducibility."
+
+---
+
+## Custom Retry vs. Tenacity Library
+
+**Problem:** LLM API calls need retry logic for transient failures.
+
+**Options:**
+1. No retry — fail immediately
+2. Tenacity library — decorator-based retry with backoff
+3. Custom exponential backoff with error classification
+
+**Chosen approach:** Custom retry with error classification.
+
+**Why:** Transparency and defensibility. The retry wrapper is ~15 lines. The error classification is specific to OpenAI's exception hierarchy. Both are fully visible and explainable.
+
+**Tradeoffs:**
+- Gained: every retry decision is visible, no external dependency, interview-friendly
+- Lost: tenacity's features (jitter, retry-after headers, composable strategies)
+
+**When the alternative is better:** In a production system with multiple API integrations, tenacity's composable retry policies save duplication. For a single integration with simple needs, custom code is clearer.

@@ -44,7 +44,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Current Status
 
-**Phase 1 complete** — Skeleton with working orchestrator, calculator tool, and validated structured output.
+**Phase 2 complete** — Tool registry with base abstraction, 3 tools (calculator, web_search stub, doc_lookup), retry with exponential backoff and error classification, structured output repair.
 
 ## Resume Claims
 

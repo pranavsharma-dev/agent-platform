@@ -40,9 +40,9 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 |--------|----------------|------|
 | "orchestration layer" | Explicit state machine with 7 states | `src/orchestrator.py` |
 | "multi-step LLM agent" | Agent loops through tool calls until answer | `src/orchestrator.py` |
-| "tool-calling" | Calculator (+ web_search, doc_lookup in Phase 2) with JSON schemas | `src/tools/` |
-| "retries" | *(Phase 2)* Exponential backoff, error classification | |
-| "structured outputs" | Pydantic AgentAnswer model (answer, citations, confidence) | `src/models.py` |
+| "tool-calling" | Calculator, web_search, doc_lookup via BaseTool registry | `src/tools/` |
+| "retries" | Exponential backoff (1s, 2s, 4s), error classification | `src/orchestrator.py`, `src/errors.py` |
+| "structured outputs" | Pydantic AgentAnswer + output repair (feed error back to LLM) | `src/models.py`, `src/orchestrator.py` |
 | "per-step tracing" | *(Phase 3)* OpenTelemetry spans per state | |
 | "token/cost accounting" | *(Phase 3)* Cost ledger: tokens × price per step | |
 | "inspectable" | GET /runs/{id} returns full run details | `src/main.py` |
@@ -101,7 +101,41 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 
 ---
 
-## What I Must Personally Know (Phase 1)
+## Interview Questions — Phase 2
+
+### Tool System
+
+**Q: Why did you create a base tool abstraction?**
+
+*Strong answer:* "Consistency and safety. Every tool follows the same contract: define an input Pydantic model, implement execute(). The base class __call__ validates input before execute() runs — tools can't receive invalid data. And schema() generates the OpenAI function schema directly from the Pydantic model, so there's one source of truth for what a tool accepts."
+
+---
+
+**Q: Why are the search results stubbed instead of hitting a real API?**
+
+*Strong answer:* "Evaluation reliability. The eval harness in Phase 5 needs reproducible inputs to detect quality regressions. If search results change between runs, I can't tell if a regression came from my code or from different search data. The stub gives me deterministic inputs so the eval isolates agent behavior. The tool interface is identical — swapping in a real API is a single class change."
+
+---
+
+### Retry and Error Handling
+
+**Q: How does your retry policy work?**
+
+*Strong answer:* "Exponential backoff — 1 second, 2 seconds, 4 seconds — max 3 attempts. But only for retryable errors: timeouts, rate limits, connection errors, and HTTP 5xx. Non-retryable errors like bad request (400) or auth failure (401) raise immediately. The error classification is explicit — is_retryable() checks the OpenAI SDK's exception hierarchy."
+
+*Follow-up: "Why exponential and not linear?"*
+
+*Answer:* "Linear backoff hammers a struggling service at a constant rate. Exponential gives the service progressively more breathing room to recover. It's the standard approach for rate-limited APIs."
+
+---
+
+**Q: Walk me through what happens when the LLM returns confidence: 5.0.**
+
+*Strong answer:* "Pydantic catches it — confidence has a ge=0.0, le=1.0 constraint. Instead of failing the run, the orchestrator sends a repair message: 'Your response couldn't be parsed. Error: confidence must be ≤ 1.0. Please respond with only a valid JSON object.' The LLM gets the original conversation plus the specific error, so it can fix the exact issue. If the repair also fails, the run fails. One retry, specific feedback, capped cost."
+
+---
+
+## What I Must Personally Know (Phase 1 + Phase 2)
 
 ### Must know
 - What a state machine is and why the orchestrator uses one
@@ -110,14 +144,22 @@ The whole eval suite runs in GitHub Actions. Docker-compose spins up the stack, 
 - How Pydantic validates the agent's answer
 - Why eval() is dangerous and how the AST parser avoids the risk
 - The request lifecycle from POST /run to response
+- How the BaseTool abstraction works — __call__ validates, execute() runs
+- How error classification decides what to retry
+- How structured output repair feeds the error back to the LLM
+- Why web_search is stubbed (eval reliability)
 
 ### Should know
 - How asyncpg connection pooling works
 - How the JSON extraction handles markdown code blocks and embedded JSON
 - How pytest-asyncio handles async tests
 - How the max_steps guard prevents infinite loops
+- How exponential backoff math works (delay = base * 2^attempt)
+- OpenAI SDK exception hierarchy (APITimeoutError, RateLimitError, APIStatusError)
+- How Pydantic model_json_schema() generates OpenAI-compatible function schemas
 
 ### Nice to know
 - Python AST module internals
 - asyncpg vs psycopg comparison
 - OpenAI API rate limiting behavior
+- Python ABC mechanics (@abstractmethod, @property)

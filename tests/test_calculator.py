@@ -1,6 +1,6 @@
 import pytest
 
-from src.tools.calculator import CalculatorTool, safe_eval
+from src.tools.calculator import CalculatorInput, CalculatorTool, safe_eval
 
 
 class TestSafeEval:
@@ -73,13 +73,17 @@ class TestCalculatorTool:
         assert "expression" in func["parameters"]["properties"]
 
     async def test_execute_integer_result(self, calculator):
-        result = await calculator.execute({"expression": "2 + 3"})
+        result = await calculator({"expression": "2 + 3"})
         assert result == "5"
 
     async def test_execute_float_result(self, calculator):
-        result = await calculator.execute({"expression": "10 / 4"})
+        result = await calculator({"expression": "10 / 4"})
         assert result == "2.5"
 
     async def test_execute_raises_on_bad_input(self, calculator):
         with pytest.raises(Exception):
-            await calculator.execute({"expression": "not math"})
+            await calculator({"expression": "not math"})
+
+    async def test_validates_input(self, calculator):
+        with pytest.raises(Exception):
+            await calculator({})

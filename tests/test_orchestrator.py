@@ -1,7 +1,10 @@
 import json
 
+import httpx
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from openai import APITimeoutError
 
 from src.models import AgentAnswer
 from src.orchestrator import Orchestrator, OrchestratorError, State
@@ -245,3 +248,149 @@ class TestStateTransitions:
 
         ctx = await orchestrator._step(ctx)
         assert ctx.state == State.COMPLETE
+
+
+class TestRetry:
+    @patch("src.orchestrator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_retries_on_timeout_then_succeeds(self, mock_sleep):
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        timeout_err = APITimeoutError(
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        )
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=[
+                timeout_err,
+                _text_response(VALID_JSON_ANSWER),
+            ]
+        )
+
+        result = await orchestrator.run("test")
+        assert result.answer == "The result is 42"
+        assert orchestrator.client.chat.completions.create.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("src.orchestrator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_gives_up_after_max_retries(self, mock_sleep):
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        timeout_err = APITimeoutError(
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        )
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=timeout_err
+        )
+
+        with pytest.raises(APITimeoutError):
+            await orchestrator.run("test")
+        assert orchestrator.client.chat.completions.create.call_count == 3
+
+    @patch("src.orchestrator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_does_not_retry_non_retryable(self, mock_sleep):
+        from openai import APIStatusError
+
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        mock_response = httpx.Response(
+            status_code=400,
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        )
+        bad_request_err = APIStatusError(
+            message="Bad request", response=mock_response, body=None
+        )
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=bad_request_err
+        )
+
+        with pytest.raises(APIStatusError):
+            await orchestrator.run("test")
+        assert orchestrator.client.chat.completions.create.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("src.orchestrator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_exponential_backoff_delays(self, mock_sleep):
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        timeout_err = APITimeoutError(
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        )
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=[
+                timeout_err,
+                timeout_err,
+                _text_response(VALID_JSON_ANSWER),
+            ]
+        )
+
+        await orchestrator.run("test")
+        delays = [call.args[0] for call in mock_sleep.call_args_list]
+        assert delays[0] == 1.0
+        assert delays[1] == 2.0
+
+
+class TestStructuredOutputRepair:
+    async def test_repairs_bad_confidence(self):
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        bad_json = '{"answer": "test", "citations": [], "confidence": 5.0}'
+        fixed_json = '{"answer": "test", "citations": [], "confidence": 0.9}'
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=[
+                _text_response(bad_json),
+                _text_response(fixed_json),
+            ]
+        )
+
+        result = await orchestrator.run("test")
+        assert result.confidence == 0.9
+        assert orchestrator.client.chat.completions.create.call_count == 2
+
+    async def test_repair_failure_raises_error(self):
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        bad_json = '{"answer": "test", "citations": [], "confidence": 5.0}'
+        still_bad = '{"answer": "test", "citations": [], "confidence": 10.0}'
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=[
+                _text_response(bad_json),
+                _text_response(still_bad),
+            ]
+        )
+
+        with pytest.raises(OrchestratorError, match="repair attempt"):
+            await orchestrator.run("test")
+
+    async def test_repairs_invalid_json(self):
+        orchestrator = Orchestrator(tools={})
+        orchestrator.client = MagicMock()
+        orchestrator.client.chat = MagicMock()
+        orchestrator.client.chat.completions = MagicMock()
+
+        fixed_json = '{"answer": "42", "citations": [], "confidence": 0.9}'
+        orchestrator.client.chat.completions.create = AsyncMock(
+            side_effect=[
+                _text_response("I think the answer is 42"),
+                _text_response(fixed_json),
+            ]
+        )
+
+        result = await orchestrator.run("test")
+        assert result.answer == "42"

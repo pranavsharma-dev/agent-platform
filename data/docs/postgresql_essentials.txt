@@ -1,0 +1,22 @@
+PostgreSQL Essentials
+
+PostgreSQL is an advanced open-source relational database management system. It emphasizes extensibility and SQL compliance.
+
+Key Features:
+- ACID compliance for reliable transactions
+- MVCC (Multi-Version Concurrency Control) for high concurrency
+- Rich data types including JSONB, arrays, and hstore
+- Full-text search capabilities
+- Extensible with custom functions, operators, and data types
+
+JSONB:
+PostgreSQL's JSONB type stores JSON data in a binary format. It supports indexing (GIN indexes), containment queries (@>), and path queries. JSONB is preferred over JSON because it's faster to process and supports indexing.
+
+Connection Pooling:
+For high-concurrency applications, connection pooling is essential. Options include:
+- PgBouncer: External lightweight connection pooler
+- asyncpg: Python async driver with built-in connection pooling via create_pool()
+- Application-level pooling via frameworks
+
+asyncpg:
+asyncpg is the fastest Python driver for PostgreSQL. It uses the binary protocol for communication, supports prepared statements, and provides built-in connection pooling. It does not include an ORM — queries are written as raw SQL strings.

@@ -1,0 +1,13 @@
+Python Programming Language Overview
+
+Python is a high-level, interpreted programming language created by Guido van Rossum and first released in 1991. Python's design philosophy emphasizes code readability, using significant indentation to delimit code blocks.
+
+Key Features:
+- Dynamic typing and garbage collection
+- Support for multiple programming paradigms: procedural, object-oriented, functional
+- Comprehensive standard library (often called "batteries included")
+- Large ecosystem of third-party packages via PyPI
+
+Python 3.12 introduced several notable features including improved error messages, support for the buffer protocol in Python code, and new typing features like TypeVar defaults.
+
+Common use cases include web development, data science, machine learning, automation, and scripting. Popular frameworks include Django and Flask for web development, and NumPy, pandas, and scikit-learn for data science.

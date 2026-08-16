@@ -52,7 +52,10 @@ If a feature doesn't trace back to one of these sentences, cut it.
 ### Phase 1 — COMPLETE ✓
 Skeleton with working orchestrator, calculator tool, validated structured output, Postgres persistence.
 
-**37/37 tests passing** (mocked LLM and DB — no external services needed for tests).
+### Phase 2 — COMPLETE ✓
+Tool registry with base abstraction, 3 tools (calculator, web_search stub, doc_lookup), retry with exponential backoff, error classification, structured output repair.
+
+**74/74 tests passing** (mocked LLM and DB — no external services needed for tests).
 
 ### What Exists
 
@@ -72,28 +75,43 @@ agent-platform/
 │   ├── config.py                # pydantic-settings, env-based
 │   ├── models.py                # AgentAnswer, Citation, RunRequest, RunResponse, RunStatus
 │   ├── db.py                    # asyncpg pool, create/complete/fail/get run
-│   ├── orchestrator.py          # ★ Explicit state machine (PLAN→SELECT_TOOL→CALL_TOOL→OBSERVE→FINALIZE)
+│   ├── errors.py                # Error classification: retryable vs non-retryable
+│   ├── orchestrator.py          # ★ State machine + retry wrapper + output repair
 │   ├── main.py                  # FastAPI: POST /run, GET /runs/{id}, GET /health
 │   └── tools/
-│       ├── __init__.py
-│       └── calculator.py        # AST-based safe_eval, CalculatorTool class
+│       ├── __init__.py          # Tool registry: build_tool_map()
+│       ├── base.py              # BaseTool ABC with Pydantic input validation
+│       ├── calculator.py        # AST-based safe_eval, CalculatorTool
+│       ├── web_search.py        # Deterministic stub for eval reliability
+│       └── doc_lookup.py        # Keyword search over local documents
+├── data/
+│   └── docs/                    # Document corpus for doc_lookup
+│       ├── python_overview.txt
+│       ├── opentelemetry_basics.txt
+│       ├── fastapi_guide.txt
+│       └── postgresql_essentials.txt
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py              # no_db fixture
-│   ├── test_calculator.py       # 17 tests
-│   ├── test_orchestrator.py     # 10 tests (mocked LLM)
-│   └── test_api.py              # 7 tests (mocked DB + orchestrator)
+│   ├── test_calculator.py       # 18 tests
+│   ├── test_orchestrator.py     # 17 tests (mocked LLM)
+│   ├── test_api.py              # 7 tests (mocked DB + orchestrator)
+│   ├── test_web_search.py       # 6 tests
+│   ├── test_doc_lookup.py       # 8 tests
+│   ├── test_errors.py           # 12 tests
+│   └── test_tool_registry.py    # 3 tests
 └── docs/
     ├── PROJECT.md
     ├── ARCHITECTURE.md
-    ├── DECISION_LOG.md           # 4 decisions documented
+    ├── DECISION_LOG.md           # 9 decisions documented
     ├── DEVELOPMENT_LOG.md
     ├── FAILURE_LOG.md
-    ├── TRADEOFFS.md              # 3 tradeoffs documented
+    ├── TRADEOFFS.md              # 5 tradeoffs documented
     ├── GLOSSARY.md
     ├── INTERVIEW_GUIDE.md
     └── PHASES/
-        └── phase-01.md
+        ├── phase-01.md
+        └── phase-02.md
 ```
 
 ### Key Architectural Decisions Made
@@ -102,6 +120,11 @@ agent-platform/
 2. **AST-based calculator** over eval() — LLM controls input, eval() is code injection
 3. **OpenAI SDK** over Anthropic — cheapest API cost (GPT-4o-mini ~5x cheaper per token)
 4. **asyncpg raw SQL** over SQLAlchemy — small schema (≤6 tables), every query visible
+5. **BaseTool with Pydantic input models** — validation before execute, schema from model
+6. **Deterministic web search stub** — eval reliability over realism
+7. **Custom exponential backoff** — transparent retry, no library dependency
+8. **Error classification** — retryable vs non-retryable based on OpenAI exception hierarchy
+9. **Output repair with error feedback** — feed specific Pydantic error back to LLM
 
 ### Database Schema (Current)
 
@@ -119,14 +142,6 @@ judge_calibration(id, eval_case_result_id, human_label, judge_label, agree)
 ```
 
 ## Remaining Phases
-
-### Phase 2 — Tool Registry + Retries + Structured Output
-- Base Tool abstraction with JSON schema validation
-- web_search tool (deterministic stub for eval reliability)
-- doc_lookup tool (simple local retrieval over fixed documents)
-- Retry wrapper: exponential backoff, max 3 attempts
-- Error classification: retryable (timeout, rate limit) vs non-retryable (bad schema, invalid request)
-- Structured output repair: feed Pydantic validation error back to LLM, retry once
 
 ### Phase 3 — Tracing + Cost Ledger
 - OpenTelemetry SDK spans for every orchestrator step (plan, tool call, LLM call)

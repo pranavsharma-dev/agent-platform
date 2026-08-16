@@ -1,3 +1,4 @@
+import asyncio
 import enum
 import json
 import logging
@@ -7,9 +8,13 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from src.config import settings
+from src.errors import is_retryable
 from src.models import AgentAnswer
 
 logger = logging.getLogger(__name__)
+
+MAX_LLM_RETRIES = 3
+RETRY_BASE_DELAY = 1.0
 
 
 class OrchestratorError(Exception):
@@ -109,7 +114,7 @@ class Orchestrator:
             case State.OBSERVE:
                 return await self._observe(ctx)
             case State.FINALIZE:
-                return self._finalize(ctx)
+                return await self._finalize(ctx)
             case _:
                 ctx.state = State.ERROR
                 ctx.error = f"Unexpected state: {ctx.state}"
@@ -161,7 +166,7 @@ class Orchestrator:
                 )
                 continue
             try:
-                result = await tool.execute(tc.input)
+                result = await tool(tc.input)
                 results.append(ToolResult(tool_use_id=tc.id, content=str(result)))
             except Exception as e:
                 results.append(
@@ -193,7 +198,7 @@ class Orchestrator:
             ctx.state = State.FINALIZE
         return ctx
 
-    def _finalize(self, ctx: RunContext) -> RunContext:
+    async def _finalize(self, ctx: RunContext) -> RunContext:
         text = self._extract_text(ctx.current_response)
 
         try:
@@ -202,8 +207,32 @@ class Orchestrator:
             ctx.answer = AgentAnswer(**data)
             ctx.state = State.COMPLETE
         except (json.JSONDecodeError, ValidationError, ValueError) as e:
+            ctx = await self._repair_output(ctx, text, e)
+        return ctx
+
+    async def _repair_output(self, ctx: RunContext, original_text: str, error: Exception) -> RunContext:
+        logger.warning("structured output failed, attempting repair: %s", error)
+        ctx.messages.append({
+            "role": "user",
+            "content": (
+                f"Your previous response could not be parsed. Error:\n{error}\n\n"
+                "Please respond with ONLY a valid JSON object matching this schema:\n"
+                '{"answer": "string", "citations": [{"source": "string", "text": "string"}], "confidence": float 0.0-1.0}'
+            ),
+        })
+
+        try:
+            response = await self._call_llm(ctx.messages)
+            ctx.current_response = response
+            self._append_assistant(ctx, response)
+            text = self._extract_text(response)
+            json_str = self._extract_json(text)
+            data = json.loads(json_str)
+            ctx.answer = AgentAnswer(**data)
+            ctx.state = State.COMPLETE
+        except (json.JSONDecodeError, ValidationError, ValueError, Exception) as repair_error:
             ctx.state = State.ERROR
-            ctx.error = f"Failed to parse structured answer: {e}"
+            ctx.error = f"Failed to parse structured answer after repair attempt: {repair_error}"
         return ctx
 
     # -- Helpers --
@@ -216,7 +245,23 @@ class Orchestrator:
         }
         if self.tool_schemas:
             kwargs["tools"] = self.tool_schemas
-        return await self.client.chat.completions.create(**kwargs)
+
+        last_error = None
+        for attempt in range(MAX_LLM_RETRIES):
+            try:
+                return await self.client.chat.completions.create(**kwargs)
+            except Exception as e:
+                last_error = e
+                if not is_retryable(e):
+                    raise
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "LLM call failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1, MAX_LLM_RETRIES, delay, e,
+                )
+                await asyncio.sleep(delay)
+
+        raise last_error
 
     @staticmethod
     def _append_assistant(ctx: RunContext, response) -> None:

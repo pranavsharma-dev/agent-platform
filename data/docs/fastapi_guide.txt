@@ -1,0 +1,30 @@
+FastAPI Framework Guide
+
+FastAPI is a modern Python web framework for building APIs. It is built on top of Starlette for the web parts and Pydantic for the data validation parts.
+
+Key Features:
+- Automatic API documentation (Swagger UI and ReDoc)
+- Type hints for request/response validation via Pydantic
+- Async support with native async/await
+- Dependency injection system
+- High performance, comparable to Node.js and Go
+
+Request Lifecycle:
+1. Client sends HTTP request
+2. FastAPI matches the route
+3. Dependency injection resolves dependencies
+4. Request body is validated against Pydantic models
+5. Route handler executes (can be async)
+6. Response is serialized and returned
+
+Lifespan Events:
+FastAPI supports startup and shutdown events via the lifespan context manager. This is useful for initializing database connections, loading ML models, or setting up background tasks.
+
+Example:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # startup: initialize resources
+        await db.connect()
+        yield
+        # shutdown: cleanup resources
+        await db.disconnect()

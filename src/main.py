@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from src import db
 from src.models import AgentAnswer, RunRequest, RunResponse, RunStatus
 from src.orchestrator import Orchestrator, OrchestratorError
-from src.tools.calculator import CalculatorTool
+from src.tools import build_tool_map
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,12 +20,11 @@ async def lifespan(app: FastAPI):
     await db.close_db()
 
 
-app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Agent Platform", version="0.2.0", lifespan=lifespan)
 
 
 def _build_orchestrator() -> Orchestrator:
-    calculator = CalculatorTool()
-    return Orchestrator(tools={"calculator": calculator})
+    return Orchestrator(tools=build_tool_map())
 
 
 @app.get("/health")

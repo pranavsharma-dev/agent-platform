@@ -1,0 +1,17 @@
+OpenTelemetry Basics
+
+OpenTelemetry (OTel) is an open-source observability framework for generating, collecting, and exporting telemetry data. It is a CNCF (Cloud Native Computing Foundation) project formed by merging OpenTracing and OpenCensus.
+
+Three Pillars of Observability:
+1. Traces: Track the path of a request through distributed systems. A trace consists of spans, where each span represents a unit of work.
+2. Metrics: Numerical measurements collected at regular intervals. Examples include request count, error rate, and latency percentiles.
+3. Logs: Timestamped text records of discrete events.
+
+Key Concepts:
+- Span: A single operation within a trace. Has a name, start time, duration, and attributes.
+- Trace: A collection of spans that share a trace ID, representing an end-to-end request.
+- Context Propagation: Mechanism to pass trace context across process boundaries.
+- Exporters: Components that send telemetry data to backends like Jaeger, Zipkin, or Prometheus.
+
+Python SDK:
+The opentelemetry-sdk package provides the Python implementation. Instrumentation can be manual (explicit span creation) or automatic (using instrumentation libraries for frameworks like Flask, FastAPI, and requests).

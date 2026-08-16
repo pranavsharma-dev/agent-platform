@@ -1,6 +1,10 @@
 import ast
 import operator
 
+from pydantic import BaseModel, Field
+
+from src.tools.base import BaseTool
+
 _SAFE_OPERATORS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -43,34 +47,19 @@ def _eval_node(node: ast.expr) -> float:
     raise ValueError(f"Unsupported expression node: {type(node).__name__}")
 
 
-class CalculatorTool:
+class CalculatorInput(BaseModel):
+    expression: str = Field(description="Mathematical expression to evaluate, e.g. '(2 + 3) * 4'")
+
+
+class CalculatorTool(BaseTool):
     name = "calculator"
     description = "Evaluate a mathematical expression. Supports +, -, *, /, %, ** operators."
 
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "expression": {
-                "type": "string",
-                "description": "Mathematical expression to evaluate, e.g. '(2 + 3) * 4'",
-            }
-        },
-        "required": ["expression"],
-    }
+    def input_model(self) -> type[BaseModel]:
+        return CalculatorInput
 
-    def schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.input_schema,
-            },
-        }
-
-    async def execute(self, input_data: dict) -> str:
-        expression = input_data["expression"]
-        result = safe_eval(expression)
+    async def execute(self, validated_input: CalculatorInput) -> str:
+        result = safe_eval(validated_input.expression)
         if result == int(result):
             return str(int(result))
         return str(result)
