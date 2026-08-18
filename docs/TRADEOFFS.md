@@ -19,10 +19,6 @@
 
 **When the alternative is better:** If you're building a product where time-to-market matters more than observability, and you trust the framework's loop, LangChain is faster to ship.
 
-**Interview question:** "When would you use LangChain instead?"
-
-**Interview answer:** "If I were building a product where shipping speed mattered more than infrastructure visibility — like a chatbot prototype — I'd use LangChain. But this project exists specifically to demonstrate observability and cost accounting at the step level. Hiding the loop inside a framework defeats the purpose. The state machine is more code, but every transition is a traceable, testable event."
-
 ---
 
 ## Safe AST Evaluator vs. eval()
@@ -43,10 +39,6 @@
 - Lost: support for mathematical functions (sqrt, sin, log)
 
 **When the alternative is better:** If you need complex math functions, a sandboxed evaluator (sympy) or a restricted eval with `__builtins__={}` would be better. But the calculator tool's purpose is to demonstrate tool calling, not to be a full CAS.
-
-**Interview question:** "What if the LLM needs sqrt() or logarithms?"
-
-**Interview answer:** "I'd add those as explicit cases in the AST evaluator — map `ast.Call` nodes for specific function names to their Python math equivalents. The principle stays the same: whitelist what's allowed rather than trying to blacklist what's dangerous."
 
 ---
 
@@ -69,10 +61,6 @@
 
 **When the alternative is better:** 20+ tables, frequent schema changes, complex joins — SQLAlchemy's migration tooling (Alembic) and query builder earn their complexity.
 
-**Interview question:** "What would you add if the schema grew to 30 tables?"
-
-**Interview answer:** "Alembic for migrations, first. Then SQLAlchemy Core (not the ORM) for query composition — I want the query builder without the identity map and session tracking overhead. For a schema this small, raw SQL is clearer."
-
 ---
 
 ## Deterministic Stub vs. Real Search API
@@ -93,10 +81,6 @@
 
 **When the alternative is better:** In production or when testing real search quality. The tool interface is the same — swapping in a real API is a single class change.
 
-**Interview question:** "How would you switch to a real search API?"
-
-**Interview answer:** "Create a new class that extends BaseTool with the same name and interface, implement execute() with the real API call, and swap it in the registry. The orchestrator doesn't know or care — it calls tools through the abstract interface. For eval, I'd keep the stub to maintain reproducibility."
-
 ---
 
 ## Custom Retry vs. Tenacity Library
@@ -110,10 +94,10 @@
 
 **Chosen approach:** Custom retry with error classification.
 
-**Why:** Transparency and defensibility. The retry wrapper is ~15 lines. The error classification is specific to OpenAI's exception hierarchy. Both are fully visible and explainable.
+**Why:** Transparency. The retry wrapper is ~15 lines. The error classification is specific to OpenAI's exception hierarchy. Both are fully visible and explainable.
 
 **Tradeoffs:**
-- Gained: every retry decision is visible, no external dependency, interview-friendly
+- Gained: every retry decision is visible, no external dependency
 - Lost: tenacity's features (jitter, retry-after headers, composable strategies)
 
 **When the alternative is better:** In a production system with multiple API integrations, tenacity's composable retry policies save duplication. For a single integration with simple needs, custom code is clearer.
@@ -138,10 +122,6 @@
 
 **When the alternative is better:** In a microservices system where multiple services emit spans and you need distributed trace visualization across services. For a single-service agent with an API-first interface, Postgres is simpler.
 
-**Interview question:** "How would you add distributed trace visualization?"
-
-**Interview answer:** "Add an OTLP exporter to the OTel SDK configuration — it's a one-line setup change. The OTel spans are already being created; I'd just add a second export destination alongside Postgres persistence. The two paths are independent."
-
 ---
 
 ## Decimal vs. Float for Cost Accounting
@@ -160,11 +140,7 @@
 - Gained: exact financial arithmetic, no drift across aggregation
 - Lost: minor code verbosity (Decimal("0.15") vs 0.15)
 
-**When the alternative is better:** If cost is purely informational (rough estimates, dashboards) and not used for regression detection, float is fine. Our CI gate (Phase 7) compares costs between runs — exact arithmetic matters.
-
-**Interview question:** "Why Decimal instead of float?"
-
-**Interview answer:** "The CI gate compares costs between eval runs — a 15% cost increase fails the build. If I use float, rounding drift across hundreds of eval cases could trigger false positives or mask real regressions. Decimal gives me exact arithmetic. The pricing table, compute_cost, and the database column all use Decimal."
+**When the alternative is better:** If cost is purely informational (rough estimates, dashboards) and not used for regression detection, float is fine. Exact arithmetic matters when comparing costs across runs.
 
 ---
 
@@ -186,10 +162,6 @@
 
 **When the alternative is better:** If questions are always identical end-to-end (no tool variance), run-level caching is simpler and equally effective.
 
-**Interview question:** "Why not cache the whole run?"
-
-**Interview answer:** "Step-level caching captures partial reuse. If two runs share the same plan step but diverge at observe, I still save the plan call's cost. Run-level is all-or-nothing — any difference in the conversation path means a full miss."
-
 ---
 
 ## Redis Cache vs. In-Memory Cache
@@ -210,10 +182,6 @@
 
 **When the alternative is better:** Single-instance, short-lived processes where restart frequency is low. functools.lru_cache would be simpler.
 
-**Interview question:** "Why not just use an in-memory cache?"
-
-**Interview answer:** "Redis was already in the stack, so no new infrastructure. It gives me TTL-based expiration for free, survives process restarts, and would scale to multiple instances. The ~1ms Redis roundtrip is negligible compared to a ~500ms LLM call."
-
 ---
 
 ## Broad Exception Catch vs. Typed Exception Hierarchy
@@ -233,10 +201,6 @@
 - Lost: any exception — including programming bugs — is caught instead of crashing. Could mask logic errors.
 
 **When the alternative is better:** In a service with a proper exception hierarchy where every external SDK call is wrapped at the integration boundary. That's the "right" design for a larger system, but requires maintaining the wrapper as the SDK evolves. At this scale, the broad catch is simpler and safer.
-
-**Interview question:** "Isn't catching Exception too broad? Won't it mask bugs?"
-
-**Interview answer:** "It could, but the alternative is worse. A stuck run with no error message is invisible — it looks like it's still processing. A failed run with an error message is observable. I log the full exception with traceback, so no information is lost. The tradeoff is clear: I'd rather have a run that says 'failed: TypeError on line 42' than one that sits at 'running' forever."
 
 ---
 

@@ -1,6 +1,6 @@
 # Architecture
 
-## Current State (Phase 4)
+## System Overview
 
 ```mermaid
 graph TD
@@ -90,8 +90,7 @@ States:
 
 Each state handler records a **SpanData** with timing, token counts, and computed cost.
 
-## Tracing + Cost Ledger (Phase 3)
-
+## Tracing + Cost Ledger
 ```
 Orchestrator Step
     ├── OTel Span (opentelemetry-api)
@@ -112,8 +111,7 @@ API endpoints:
 - `GET /runs/{id}` — returns run + full trace (list of spans)
 - `GET /runs/{id}/cost` — returns cost breakdown: total, per-span costs, aggregate tokens
 
-## Tool System (Phase 2)
-
+## Tool System
 ```
 BaseTool (ABC)
 ├── name, description (abstract properties)
@@ -130,8 +128,7 @@ Implementations:
 
 Tool registry in `src/tools/__init__.py` provides `build_tool_map()` — returns all tools keyed by name.
 
-## Error Classification (Phase 2)
-
+## Error Classification
 ```
 Exception
 ├── Retryable: APITimeoutError, RateLimitError, APIConnectionError, HTTP 5xx
@@ -170,8 +167,7 @@ spans(
 )
 ```
 
-## Content-Hash Cache (Phase 4)
-
+## Content-Hash Cache
 ```
 Before each LLM call:
     key = SHA-256(step_type + JSON.dumps(input, sort_keys=True))
@@ -186,8 +182,7 @@ Not cached: tool_call (local, free), finalize (parsing, free), select_tool (pars
 Graceful degradation: Redis down → cache_get returns None → normal LLM call
 ```
 
-## Components (Phase 4)
-
+## Components
 | Component        | File                       | Purpose                                    |
 |------------------|----------------------------|--------------------------------------------|
 | API Gateway      | `src/main.py`              | FastAPI app, endpoints, span parsing       |
@@ -204,8 +199,8 @@ Graceful degradation: Redis down → cache_get returns None → normal LLM call
 | DB Layer         | `src/db.py`                | asyncpg pool, CRUD, span persistence       |
 | Config           | `src/config.py`            | Environment-based settings                 |
 
-## Planned Components (Future Phases)
+## Potential Extensions
 
-- Evaluation harness + graders + LLM judge (Phase 5)
-- Human calibration workflow (Phase 6)
-- CI regression gate (Phase 7)
+- Evaluation harness with deterministic graders and LLM judge
+- Human calibration workflow for judge validation
+- CI regression gate for quality and cost thresholds

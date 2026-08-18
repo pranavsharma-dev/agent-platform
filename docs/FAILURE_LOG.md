@@ -1,8 +1,8 @@
 # Failure Log
 
-## Failure: Stuck runs on unhandled exceptions (Phase 4 audit)
+## Failure: Stuck runs on unhandled exceptions
 
-**Discovered:** Phase 4 post-implementation audit, 2026-08-16
+**Discovered:** Post-implementation audit, 2026-08-16
 
 **Symptom:** When `orchestrator.run()` raised a raw OpenAI SDK exception (e.g., `AuthenticationError`, `APITimeoutError` after retry exhaustion), the `POST /run` handler only caught `OrchestratorError`. The raw exception propagated as an HTTP 500, and the Postgres run row stayed permanently at `status='running'` with no error message.
 
@@ -14,13 +14,13 @@
 
 **Regression test:** `test_raw_exception_still_fails_run` in `tests/test_api.py` — raises `AuthenticationError` from the orchestrator and asserts the response has `status='failed'`.
 
-**Lesson:** When the orchestrator's error type hierarchy doesn't cover all possible exceptions (because it delegates to an external SDK), the API boundary must catch broadly. This is especially important before Phase 5, where eval sweeps will hit rate limits routinely.
+**Lesson:** When the orchestrator's error type hierarchy doesn't cover all possible exceptions (because it delegates to an external SDK), the API boundary must catch broadly.
 
 ---
 
-## Failure: Token double-counting on cache hits (Phase 4 audit)
+## Failure: Token double-counting on cache hits
 
-**Discovered:** Phase 4 post-implementation audit, 2026-08-16
+**Discovered:** Post-implementation audit, 2026-08-16
 
 **Symptom:** `GET /runs/{id}/cost` summed `tokens_in`/`tokens_out` across all spans including cache hits. Cache-hit spans stored the original run's token counts even though no API call was made, inflating aggregate token totals.
 
@@ -34,9 +34,9 @@
 
 ---
 
-## Failure: fail_run not persisting error messages (Phase 3 audit)
+## Failure: fail_run not persisting error messages
 
-**Discovered:** Pre-Phase 4 code review, 2026-08-16
+**Discovered:** Code review, 2026-08-16
 
 **Symptom:** `db.fail_run()` accepted an error string parameter but didn't include it in the SQL UPDATE. Failed runs had `error_message=NULL` in the database.
 
@@ -46,9 +46,9 @@
 
 ---
 
-## Failure: _extract_json brace-matching broke on JSON string values (Phase 3 audit)
+## Failure: _extract_json brace-matching broke on JSON string values
 
-**Discovered:** Pre-Phase 4 code review, 2026-08-16
+**Discovered:** Code review, 2026-08-16
 
 **Symptom:** `_extract_json` used simple brace-depth counting. JSON like `{"answer": "Use {braces} here"}` would match the inner closing brace, truncating the JSON and causing a parse error.
 

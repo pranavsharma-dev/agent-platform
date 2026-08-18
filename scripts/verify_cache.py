@@ -1,5 +1,5 @@
 """
-Verification script for Phase 4: Content-Hash Cache.
+Verification script for Content-Hash Cache.
 
 Runs the same question twice against the API and compares costs.
 The second run should be cheaper (cache hits on LLM calls → $0 cost).
@@ -46,7 +46,7 @@ def run_question(label: str) -> dict:
 
 
 def main():
-    print("Phase 4 Cache Verification")
+    print("Cache Verification")
     print("=" * 60)
     print(f"Question: {QUESTION}")
 

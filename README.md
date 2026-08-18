@@ -2,13 +2,11 @@
 
 Infrastructure platform for a multi-step LLM research agent — making every run observable, measurable, and reproducible.
 
-The agent receives a question, plans a strategy, calls tools (search, calculator, document lookup), and produces a structured, cited answer. The platform wraps this agent with production-grade infrastructure: per-step tracing, token/cost accounting, content-hash caching, a regression-eval harness with deterministic graders and an LLM judge calibrated against human labels, and a CI gate that blocks merges on quality or cost regressions.
+The agent receives a question, plans a strategy, calls tools (search, calculator, document lookup), and produces a structured, cited answer. The platform wraps this agent with production-grade infrastructure: per-step tracing, token/cost accounting, content-hash caching, and CI.
 
-## Why This Exists
+## Motivation
 
-LLM agents are black boxes. You call the API, get an answer, and have no idea what happened in between. You can't attribute cost to individual steps, can't detect quality regressions across deployments, can't cache repeated work, and can't gate releases on quality metrics.
-
-This platform makes every agent run **inspectable** (what did the agent do?), **attributable** (what did each step cost?), and **evaluable** (did the answer quality change?).
+When you run an LLM agent, you get an answer but no visibility into what happened along the way — which tools it called, how many tokens each step burned, or why the cost spiked on one particular run. This project wraps that agent with infrastructure to answer those questions.
 
 ## Key Features
 
@@ -19,9 +17,6 @@ This platform makes every agent run **inspectable** (what did the agent do?), **
 - **Content-hash cache in Redis** — SHA-256 of (step_type + normalized input) as cache key; cache hits skip the LLM call entirely at zero cost; graceful degradation when Redis is unavailable
 - **Retry with exponential backoff and error classification** — retryable errors (timeout, rate limit, 5xx) get exponential backoff; non-retryable errors (auth, validation) raise immediately
 - **Structured output repair** — when the LLM returns invalid JSON, the Pydantic validation error is fed back to the model for a targeted retry
-- **Regression-eval harness** — versioned YAML eval sets with deterministic graders (exact match, citation validation, schema check) and a GPT-4o LLM judge scoring correctness and groundedness on a 1–5 rubric
-- **Judge calibration against human labels** — human-labeled subset with agreement rate and Cohen's kappa, making "calibrated against human labels" a measurable claim
-- **CI quality gate** — GitHub Actions workflow runs the full eval suite and fails the build if quality drops >5% or cost increases >15% compared to the stored baseline
 
 ## Architecture
 
@@ -52,13 +47,6 @@ graph TD
     Validate -->|valid| Answer[AgentAnswer]
     Validate -->|invalid| Repair[Output Repair]
     Repair -->|retry| Validate
-
-    EvalRunner[Eval Runner] --> Orch
-    EvalRunner --> Graders[Deterministic Graders]
-    EvalRunner --> Judge[LLM Judge<br/>GPT-4o]
-    EvalRunner --> Baseline[baseline.json]
-    CI[GitHub Actions] --> EvalRunner
-    CI -->|quality ↓ >5%<br/>cost ↑ >15%| Fail[Fail Build]
 ```
 
 ## Tech Stack
@@ -70,12 +58,11 @@ graph TD
 | Database | PostgreSQL 16 | JSONB for flexible fields, relational integrity for runs/spans/evals |
 | Cache | Redis 7 | TTL-based expiration, survives restarts, shared across instances |
 | Tracing | OpenTelemetry SDK | Industry-standard spans with context propagation, backend-agnostic |
-| LLM (agent) | GPT-4o-mini via OpenAI SDK | Lowest per-token cost (~$0.15/M input), mature function-calling API |
-| LLM (judge) | GPT-4o via OpenAI SDK | Higher capability for nuanced quality assessment |
+| LLM | GPT-4o-mini via OpenAI SDK | Lowest per-token cost (~$0.15/M input), mature function-calling API |
 | Validation | Pydantic v2 | Type-safe schemas, automatic JSON Schema for tool definitions |
 | DB driver | asyncpg | Fastest Python Postgres driver, raw SQL for full query visibility |
 | Containers | Docker + Compose | Single `docker compose up` for the full stack |
-| CI | GitHub Actions | Eval suite in CI, quality/cost gate on every PR |
+| CI | GitHub Actions | Automated test suite on every push and PR |
 
 ## How It Works
 
@@ -89,15 +76,6 @@ graph TD
 6. **Trace** — every step records an OpenTelemetry span and a SpanData record with tokens, cost, latency, and cache status
 7. **Persist** — spans are written to Postgres; total cost is accumulated on the run record
 8. **Response** — the client receives the answer, full trace, and cost breakdown
-
-### Evaluation Pipeline
-
-1. **Eval cases** — versioned YAML dataset of (question, expected_answer, metadata) tuples tracked in git
-2. **Eval runner** — feeds each case through the agent, collects the answer and trace
-3. **Deterministic graders** — exact match, citation validation, schema conformance checks produce binary pass/fail scores
-4. **LLM judge** — GPT-4o scores correctness and groundedness on a 1–5 rubric with written rationale
-5. **Aggregation** — per-case and aggregate scores stored in Postgres alongside cost data
-6. **CI comparison** — scores and costs are compared against `baseline.json`; the build fails if quality drops >5% or cost rises >15%
 
 ## Project Structure
 
@@ -117,17 +95,14 @@ agent-platform/
 │       ├── calculator.py    # AST-based safe math evaluator
 │       ├── web_search.py    # Deterministic stub for eval reproducibility
 │       └── doc_lookup.py    # Keyword search over local documents
-├── evals/
-│   └── v1/
-│       └── cases.yaml       # Versioned evaluation dataset
 ├── db/
 │   └── init.sql             # DDL for runs, spans, eval tables
 ├── tests/                   # Unit + integration tests (mocked LLM, DB, Redis)
 ├── scripts/                 # Verification and utility scripts
-├── docs/                    # Architecture, decisions, tradeoffs, interview prep
+├── docs/                    # Architecture, decisions, tradeoffs
 ├── .github/
 │   └── workflows/
-│       └── ci.yml           # Test + eval gate
+│       └── ci.yml           # Automated test suite
 ├── docker-compose.yml       # Postgres 16, Redis 7, app
 ├── Dockerfile
 └── requirements.txt
@@ -215,25 +190,6 @@ spans (
     ended_at    TIMESTAMPTZ
 )
 
--- Evaluation run aggregates
-eval_runs (
-    id                  UUID PRIMARY KEY,
-    git_sha             TEXT,
-    created_at          TIMESTAMPTZ,
-    aggregate_score     REAL,
-    aggregate_cost_usd  NUMERIC,
-    passed              BOOLEAN
-)
-
--- Per-case evaluation results
-eval_case_results (
-    id                  UUID PRIMARY KEY,
-    eval_run_id         UUID REFERENCES eval_runs(id),
-    case_id             TEXT,
-    deterministic_score REAL,
-    judge_score         REAL,
-    passed              BOOLEAN
-)
 ```
 
 ## Testing
@@ -316,7 +272,7 @@ Each LLM call is cached at the **step level**, not the run level. This enables p
 
 ### Decimal Arithmetic for Cost
 
-The CI gate compares costs between eval runs — a 15% increase fails the build. Floating-point rounding across hundreds of eval cases could trigger false positives or mask real regressions. Python `Decimal` provides exact arithmetic from the pricing table through aggregation.
+Floating-point rounding accumulates across many API calls. Python `Decimal` provides exact arithmetic from the per-token pricing table through aggregation, so cost comparisons between runs are reliable.
 
 ### Postgres Over Jaeger for Traces
 
@@ -324,15 +280,15 @@ Spans are persisted to Postgres rather than shipped to an OTel collector. This m
 
 ### Deterministic Search Stub
 
-The web search tool returns canned results for known queries. This ensures evaluation reproducibility — if search results change between eval runs, you can't distinguish code regressions from data changes. The tool interface is identical to a real implementation; swapping in a live API is a single class change.
+The web search tool returns canned results for known queries. This ensures reproducibility — if search results change between test runs, you can't distinguish code issues from data changes. The tool interface is identical to a real implementation; swapping in a live API is a single class change.
 
 ## Challenges and Tradeoffs
 
-**Observability vs. development speed** — Building a custom orchestrator instead of using LangChain required significantly more code, but every state transition became a traceable, testable event. The tradeoff pays off in the evaluation and CI phases, where step-level visibility is essential.
+**Observability vs. development speed** — Building a custom orchestrator instead of using LangChain required significantly more code, but every state transition became a traceable, testable event. Step-level visibility makes debugging and cost analysis straightforward.
 
 **Cache correctness across tool-call IDs** — Cached plan responses carry tool-call IDs from the original run. These IDs flow through the tool execution path and into the observe step's messages, which become part of the next cache key. Because the full messages list is byte-identical to the original run, subsequent cache lookups hit correctly. Non-deterministic tool results naturally cause cache misses — the system fails safe (more LLM calls, never stale answers).
 
-**Stuck run prevention** — A self-audit revealed that raw OpenAI SDK exceptions (not wrapped in the orchestrator's error type) propagated through the API handler, leaving run records permanently stuck at `status='running'`. The fix was broadening the API boundary's exception handling to catch `Exception`, logging the full traceback. This was found while all 117 tests passed — a concrete example of how mocking at the wrong abstraction level can give false confidence.
+**Stuck run prevention** — Raw OpenAI SDK exceptions (not wrapped in the orchestrator's error type) could propagate through the API handler, leaving run records stuck at `status='running'` forever. I found this while all 117 tests passed — the mocks never raised the SDK's native exceptions. Fixed by broadening the API boundary's catch to `Exception` with full traceback logging.
 
 **Token count reconciliation** — Cache-hit spans initially stored historical token counts from the original run, inflating aggregate totals. This was fixed to report zero tokens on cache hits so that `total_tokens_in/out` reconciles with actual OpenAI API billing.
 
